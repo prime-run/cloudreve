@@ -75,7 +75,11 @@ func NewRawEntClient(l logging.Logger, config conf.ConfigProvider) (*ent.Client,
 		case conf.SQLiteDB:
 			dbFile := util.RelativePath(dbConfig.DBFile)
 			l.Info("Connect to SQLite database %q.", dbFile)
-			client, err = sql.Open("sqlite3", util.RelativePath(dbConfig.DBFile))
+			// modernc.org/sqlite defaults to time.Time.String() on write. That form
+			// does not round-trip in timezones whose zone name is a numeric offset
+			// (e.g. Asia/Tehran → "+0330 +0330"), which makes later scans into
+			// *time.Time fail. Force the SQLite-compatible write format instead.
+			client, err = sql.Open("sqlite3", dbFile+"?_time_format=sqlite")
 		case conf.PostgresDB:
 			l.Info("Connect to Postgres database %q.", dbConfig.Host)
 			client, err = sql.Open("postgres", fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%d sslmode=disable",
