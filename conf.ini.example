@@ -1,0 +1,16 @@
+; Copy to data/conf.ini (or pass with -c). data/ is gitignored.
+[System]
+Debug = true
+Mode = master
+Listen = :5212
+SessionSecret = change-me-to-a-long-random-string
+HashIDSalt = change-me-too
+LogLevel = debug
+
+[Database]
+Type = postgres
+Host = 127.0.0.1
+Port = 5432
+User = cloudreve
+Password = cloudreve_dev
+Name = cloudreve
