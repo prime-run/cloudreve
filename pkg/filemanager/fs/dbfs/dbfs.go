@@ -45,7 +45,8 @@ type (
 func NewDatabaseFS(u *ent.User, fileClient inventory.FileClient, shareClient inventory.ShareClient,
 	l logging.Logger, ls lock.LockSystem, settingClient setting.Provider,
 	storagePolicyClient inventory.StoragePolicyClient, hasher hashid.Encoder, userClient inventory.UserClient,
-	cache, stateKv cache.Driver, directLinkClient inventory.DirectLinkClient, encryptorFactory encrypt.CryptorFactory, eventHub eventhub.EventHub) fs.FileSystem {
+	cache, stateKv cache.Driver, directLinkClient inventory.DirectLinkClient, encryptorFactory encrypt.CryptorFactory,
+	eventHub eventhub.EventHub, teamClient inventory.TeamClient) fs.FileSystem {
 	return &DBFS{
 		user:                u,
 		navigators:          make(map[string]Navigator),
@@ -62,6 +63,7 @@ func NewDatabaseFS(u *ent.User, fileClient inventory.FileClient, shareClient inv
 		directLinkClient:    directLinkClient,
 		encryptorFactory:    encryptorFactory,
 		eventHub:            eventHub,
+		teamClient:          teamClient,
 	}
 }
 
@@ -73,6 +75,7 @@ type DBFS struct {
 	storagePolicyClient inventory.StoragePolicyClient
 	shareClient         inventory.ShareClient
 	directLinkClient    inventory.DirectLinkClient
+	teamClient          inventory.TeamClient
 	l                   logging.Logger
 	ls                  lock.LockSystem
 	settingClient       setting.Provider
@@ -451,7 +454,7 @@ func (f *DBFS) Get(ctx context.Context, path *fs.URI, opts ...fs.Option) (fs.Fil
 
 	// Calculate folder summary if requested
 	if o.loadFolderSummary && target != nil && target.Type() == types.FileTypeFolder {
-		if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.OwnerID() != f.user.ID {
+		if !f.ownerAllowed(ctx, target.OwnerID(), path) {
 			return nil, fs.ErrOwnerOnly
 		}
 
@@ -547,7 +550,7 @@ func (f *DBFS) Walk(ctx context.Context, path *fs.URI, depth int, walk fs.WalkFu
 	}
 
 	// Require Read permission
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.OwnerID() != f.user.ID {
+	if !f.ownerAllowed(ctx, target.OwnerID(), path) {
 		return fs.ErrOwnerOnly
 	}
 
@@ -592,6 +595,9 @@ func (f *DBFS) createFile(ctx context.Context, parent *File, name string, fileTy
 		MetadataPrivateMask: make(map[string]bool),
 		Metadata:            make(map[string]string),
 		IsSymbolic:          o.isSymbolicLink,
+	}
+	if parent.Uri(false) != nil && parent.Uri(false).FileSystem() == constants.FileSystemTeam {
+		createFileArgs.OwnerID = f.user.ID
 	}
 
 	if o.Metadata != nil {
@@ -737,6 +743,8 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 			n = NewTrashNavigator(f.user, f.fileClient, f.l, config, f.hasher)
 		case constants.FileSystemSharedWithMe:
 			n = NewSharedWithMeNavigator(f.user, f.fileClient, f.l, config, f.hasher)
+		case constants.FileSystemTeam:
+			n = NewTeamNavigator(f.user, f.fileClient, f.teamClient, f.l, config, f.hasher)
 		default:
 			return nil, fmt.Errorf("unknown file system %q", pathFs)
 		}
@@ -780,6 +788,8 @@ func (f *DBFS) navigatorId(path *fs.URI) string {
 		return fmt.Sprintf("%s/%s/%d", constants.FileSystemShare, path.ID(uidHashed), f.user.ID)
 	case constants.FileSystemTrash:
 		return fmt.Sprintf("%s/%s", constants.FileSystemTrash, path.ID(uidHashed))
+	case constants.FileSystemTeam:
+		return fmt.Sprintf("%s/%s/%d", constants.FileSystemTeam, path.ID(""), f.user.ID)
 	default:
 		return fmt.Sprintf("%s/%s/%d", path.FileSystem(), path.ID(uidHashed), f.user.ID)
 	}
@@ -804,17 +814,43 @@ func generateSavePath(policy *ent.StoragePolicy, req *fs.UploadRequest, user *en
 
 func canMoveOrCopyTo(src, dst *fs.URI, isCopy bool) bool {
 	if isCopy {
-		return src.FileSystem() == dst.FileSystem() && src.FileSystem() == constants.FileSystemMy
-	} else {
+		if src.FileSystem() != dst.FileSystem() {
+			return false
+		}
 		switch src.FileSystem() {
 		case constants.FileSystemMy:
-			return dst.FileSystem() == constants.FileSystemMy || dst.FileSystem() == constants.FileSystemTrash
-		case constants.FileSystemTrash:
-			return dst.FileSystem() == constants.FileSystemMy
-
+			return true
+		case constants.FileSystemTeam:
+			return src.ID("") != "" && src.ID("") == dst.ID("")
+		default:
+			return false
 		}
 	}
 
+	switch src.FileSystem() {
+	case constants.FileSystemMy:
+		return dst.FileSystem() == constants.FileSystemMy || dst.FileSystem() == constants.FileSystemTrash
+	case constants.FileSystemTrash:
+		return dst.FileSystem() == constants.FileSystemMy
+	case constants.FileSystemTeam:
+		return dst.FileSystem() == constants.FileSystemTeam && src.ID("") != "" && src.ID("") == dst.ID("")
+	}
+
+	return false
+}
+
+// ownerAllowed reports whether the current user may mutate a file.
+// Team membership is authorized by the team navigator; owner checks are skipped for team URIs.
+func (f *DBFS) ownerAllowed(ctx context.Context, ownerID int, uri *fs.URI) bool {
+	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); ok {
+		return true
+	}
+	if ownerID == f.user.ID {
+		return true
+	}
+	if uri != nil && uri.FileSystem() == constants.FileSystemTeam {
+		return true
+	}
 	return false
 }
 

@@ -930,6 +930,46 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 					)
 				}
 
+				// Team / workspace management
+				teamAdmin := admin.Group("team")
+				{
+					teamAdmin.POST("",
+						controllers.FromJSON[adminsvc.AdminListService](adminsvc.AdminListServiceParamsCtx{}),
+						controllers.AdminListTeams,
+					)
+					teamAdmin.GET(":id",
+						controllers.FromUri[adminsvc.SingleTeamService](adminsvc.SingleTeamParamCtx{}),
+						controllers.AdminGetTeam,
+					)
+					teamAdmin.PUT("",
+						middleware.RequiredScopes(types.ScopeAdminWrite),
+						controllers.FromJSON[adminsvc.CreateTeamService](adminsvc.CreateTeamParamCtx{}),
+						controllers.AdminCreateTeam,
+					)
+					teamAdmin.PATCH(":id",
+						middleware.RequiredScopes(types.ScopeAdminWrite),
+						controllers.FromUri[adminsvc.SingleTeamService](adminsvc.SingleTeamParamCtx{}),
+						controllers.FromJSON[adminsvc.RenameTeamService](adminsvc.RenameTeamParamCtx{}),
+						controllers.AdminRenameTeam,
+					)
+					teamAdmin.DELETE(":id",
+						middleware.RequiredScopes(types.ScopeAdminWrite),
+						controllers.FromUri[adminsvc.SingleTeamService](adminsvc.SingleTeamParamCtx{}),
+						controllers.AdminDeleteTeam,
+					)
+					teamAdmin.PUT(":id/member",
+						middleware.RequiredScopes(types.ScopeAdminWrite),
+						controllers.FromUri[adminsvc.SingleTeamService](adminsvc.SingleTeamParamCtx{}),
+						controllers.FromJSON[adminsvc.UpsertTeamMemberService](adminsvc.UpsertTeamMemberParamCtx{}),
+						controllers.AdminUpsertTeamMember,
+					)
+					teamAdmin.DELETE(":id/member/:userId",
+						middleware.RequiredScopes(types.ScopeAdminWrite),
+						controllers.FromUri[adminsvc.RemoveTeamMemberService](adminsvc.RemoveTeamMemberParamCtx{}),
+						controllers.AdminRemoveTeamMember,
+					)
+				}
+
 				tool := admin.Group("tool")
 				{
 					tool.GET("wopi",
@@ -1241,6 +1281,12 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 					)
 				}
 			}
+
+			// Current user's teams
+			auth.GET("team",
+				middleware.RequiredScopes(types.ScopeFilesRead),
+				controllers.ListTeams,
+			)
 
 			// 用户
 			user := auth.Group("user")

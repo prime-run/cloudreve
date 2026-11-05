@@ -127,7 +127,8 @@ func (f *File) SizeUsed() int64 {
 }
 
 func (f *File) InTrashBin() bool {
-	return f.Root().Name() != inventory.RootFolderName
+	name := f.Root().Name()
+	return name != inventory.RootFolderName && name != inventory.TeamRootFolderName
 }
 
 func (f *File) UpdatedAt() time.Time {
@@ -294,7 +295,7 @@ func (f *File) IsRootFolder() bool {
 func (f *File) IsRootFile() bool {
 	uri := f.Uri(false)
 	p := uri.Path()
-	return f.Model.Name == inventory.RootFolderName || p == fs.Separator || p == ""
+	return f.Model.Name == inventory.RootFolderName || f.Model.Name == inventory.TeamRootFolderName || p == fs.Separator || p == ""
 }
 
 func (f *File) Entities() []fs.Entity {

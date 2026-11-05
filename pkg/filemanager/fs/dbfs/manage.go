@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudreve/Cloudreve/v4/application/constants"
 	"github.com/cloudreve/Cloudreve/v4/ent"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
@@ -57,7 +58,7 @@ func (f *DBFS) Create(ctx context.Context, path *fs.URI, fileType types.FileType
 			WithError(fmt.Errorf("object with the same name but different type %v already exist", ancestor.Type()))
 	}
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && ancestor.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, ancestor.Owner().ID, path) {
 		return nil, fs.ErrOwnerOnly
 	}
 
@@ -89,8 +90,12 @@ func (f *DBFS) Create(ctx context.Context, path *fs.URI, fileType types.FileType
 		}
 
 		if i < len(desired)-1 || fileType == types.FileTypeFolder {
+			ownerID := ancestor.Model.OwnerID
+			if path.FileSystem() == constants.FileSystemTeam {
+				ownerID = f.user.ID
+			}
 			args := &inventory.CreateFolderParameters{
-				Owner: ancestor.Model.OwnerID,
+				Owner: ownerID,
 				Name:  desired[i],
 			}
 
@@ -162,7 +167,7 @@ func (f *DBFS) Rename(ctx context.Context, path *fs.URI, newName string) (fs.Fil
 	}
 	oldName := target.Name()
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, target.Owner().ID, path) {
 		return nil, nil, fs.ErrOwnerOnly
 	}
 
@@ -265,7 +270,7 @@ func (f *DBFS) SoftDelete(ctx context.Context, path ...*fs.URI) error {
 			continue
 		}
 
-		if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+		if !f.ownerAllowed(ctx, target.Owner().ID, p) {
 			ae.Add(p.String(), fs.ErrOwnerOnly.WithError(fmt.Errorf("only file owner can delete file without trash bin")))
 			continue
 		}
@@ -359,7 +364,7 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 			continue
 		}
 
-		if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !o.SysSkipSoftDelete && !ok && target.Owner().ID != f.user.ID {
+		if !o.SysSkipSoftDelete && !f.ownerAllowed(ctx, target.Owner().ID, p) {
 			ae.Add(p.String(), fs.ErrOwnerOnly)
 			continue
 		}
@@ -429,7 +434,7 @@ func (f *DBFS) VersionControl(ctx context.Context, path *fs.URI, versionId int, 
 		return nil, fmt.Errorf("failed to get target file: %w", err)
 	}
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, target.Owner().ID, path) {
 		return nil, fs.ErrOwnerOnly
 	}
 
@@ -546,7 +551,7 @@ func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCo
 		return nil, fmt.Errorf("faield to get destination folder: %w", err)
 	}
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && destination.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, destination.Owner().ID, dst) {
 		return nil, fs.ErrOwnerOnly
 	}
 
@@ -582,7 +587,7 @@ func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCo
 			continue
 		}
 
-		if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+		if !f.ownerAllowed(ctx, target.Owner().ID, p) {
 			ae.Add(p.String(), fs.ErrOwnerOnly)
 			continue
 		}

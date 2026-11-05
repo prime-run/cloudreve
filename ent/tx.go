@@ -44,6 +44,10 @@ type Tx struct {
 	StoragePolicy *StoragePolicyClient
 	// Task is the client for interacting with the Task builders.
 	Task *TaskClient
+	// Team is the client for interacting with the Team builders.
+	Team *TeamClient
+	// TeamMember is the client for interacting with the TeamMember builders.
+	TeamMember *TeamMemberClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
 
@@ -192,6 +196,8 @@ func (tx *Tx) init() {
 	tx.Share = NewShareClient(tx.config)
 	tx.StoragePolicy = NewStoragePolicyClient(tx.config)
 	tx.Task = NewTaskClient(tx.config)
+	tx.Team = NewTeamClient(tx.config)
+	tx.TeamMember = NewTeamMemberClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 }
 
