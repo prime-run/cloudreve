@@ -37,7 +37,7 @@ type (
 
 type (
 	UpsertTeamMemberService struct {
-		UserID int    `json:"user_id" binding:"required"`
+		UserID string `json:"user_id" binding:"required"`
 		Role   string `json:"role" binding:"required"`
 	}
 	UpsertTeamMemberParamCtx struct{}
@@ -45,8 +45,8 @@ type (
 
 type (
 	RemoveTeamMemberService struct {
-		ID     int `uri:"id" binding:"required"`
-		UserID int `uri:"userId" binding:"required"`
+		ID     int    `uri:"id" binding:"required"`
+		UserID string `uri:"userId" binding:"required"`
 	}
 	RemoveTeamMemberParamCtx struct{}
 )
@@ -193,13 +193,19 @@ func (s *SingleTeamService) UpsertMember(c *gin.Context, body *UpsertTeamMemberS
 	dep := dependency.FromContext(c)
 	teamClient := dep.TeamClient()
 	userClient := dep.UserClient()
+	hasher := dep.HashIDEncoder()
 
 	role, err := parseTeamRole(body.Role)
 	if err != nil {
 		return nil, err
 	}
 
-	if _, err := userClient.GetByID(c, body.UserID); err != nil {
+	userID, err := hasher.Decode(body.UserID, hashid.UserID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeParamErr, "Invalid user id", err)
+	}
+
+	if _, err := userClient.GetByID(c, userID); err != nil {
 		return nil, serializer.NewError(serializer.CodeNotFound, "User not found", err)
 	}
 
@@ -207,7 +213,7 @@ func (s *SingleTeamService) UpsertMember(c *gin.Context, body *UpsertTeamMemberS
 		return nil, serializer.NewError(serializer.CodeNotFound, "Team not found", err)
 	}
 
-	_, err = teamClient.UpsertMember(c, s.ID, body.UserID, role)
+	_, err = teamClient.UpsertMember(c, s.ID, userID, role)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeParamErr, err.Error(), err)
 	}
@@ -218,8 +224,14 @@ func (s *SingleTeamService) UpsertMember(c *gin.Context, body *UpsertTeamMemberS
 func (s *RemoveTeamMemberService) Remove(c *gin.Context) (*GetTeamResponse, error) {
 	dep := dependency.FromContext(c)
 	teamClient := dep.TeamClient()
+	hasher := dep.HashIDEncoder()
 
-	if err := teamClient.RemoveMember(c, s.ID, s.UserID); err != nil {
+	userID, err := hasher.Decode(s.UserID, hashid.UserID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeParamErr, "Invalid user id", err)
+	}
+
+	if err := teamClient.RemoveMember(c, s.ID, userID); err != nil {
 		if ent.IsNotFound(err) {
 			return nil, serializer.NewError(serializer.CodeNotFound, "Member not found", err)
 		}
