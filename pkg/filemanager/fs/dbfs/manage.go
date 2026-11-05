@@ -348,6 +348,13 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 	ae := serializer.NewAggregateError()
 	fileNavGroup := make(map[Navigator][]*File)
 	ctx = context.WithValue(ctx, inventory.LoadFileEntity{}, true)
+	if len(path) > 0 {
+		var err error
+		ctx, _, err = f.withTeamStorageCtx(ctx, path[0])
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
 	for _, p := range path {
 		// Get navigator
@@ -408,7 +415,7 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 	}
 
 	tx.AppendStorageDiff(storageDiff)
-	if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, tx); err != nil {
 		return nil, nil, serializer.NewError(serializer.CodeDBError, "Failed to commit delete change", err)
 	}
 	f.emitFileDeleted(ctx, targets...)
@@ -418,6 +425,11 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 }
 
 func (f *DBFS) VersionControl(ctx context.Context, path *fs.URI, versionId int, delete bool) (*fs.IndexDiff, error) {
+	ctx, _, err := f.withTeamStorageCtx(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get navigator
 	navigator, err := f.getNavigator(ctx, path, NavigatorCapabilityVersionControl)
 	if err != nil {
@@ -457,7 +469,7 @@ func (f *DBFS) VersionControl(ctx context.Context, path *fs.URI, versionId int, 
 			return nil, err
 		}
 
-		if err := f.userClient.ApplyStorageDiff(ctx, storageDiff); err != nil {
+		if err := f.applyStorageDiff(ctx, storageDiff); err != nil {
 			f.l.Error("Failed to apply storage diff after deleting version: %s", err)
 		}
 		return nil, nil
@@ -539,6 +551,11 @@ func (f *DBFS) Restore(ctx context.Context, path ...*fs.URI) error {
 }
 
 func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCopy bool) (*fs.IndexDiff, error) {
+	ctx, _, err := f.withTeamStorageCtx(ctx, dst)
+	if err != nil {
+		return nil, err
+	}
+
 	targets := make([]*File, 0, len(path))
 	dstNavigator, err := f.getNavigator(ctx, dst, NavigatorCapabilityLockFile)
 	if err != nil {
@@ -669,7 +686,7 @@ func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCo
 
 		indexDiff.Merge(indexDiffBatch)
 		tx.AppendStorageDiff(storageDiff)
-		if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+		if err := f.commitStorageDiff(ctx, tx); err != nil {
 			return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit move change", err)
 		}
 
@@ -817,7 +834,7 @@ func (f *DBFS) setCurrentVersion(ctx context.Context, target *File, versionId in
 	}
 
 	tx.AppendStorageDiff(diff)
-	if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, tx); err != nil {
 		return serializer.NewError(serializer.CodeDBError, "Failed to commit set current version", err)
 	}
 

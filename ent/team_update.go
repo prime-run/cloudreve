@@ -84,6 +84,54 @@ func (tu *TeamUpdate) SetNillableRootFileID(i *int) *TeamUpdate {
 	return tu
 }
 
+// SetMaxStorage sets the "max_storage" field.
+func (tu *TeamUpdate) SetMaxStorage(i int64) *TeamUpdate {
+	tu.mutation.ResetMaxStorage()
+	tu.mutation.SetMaxStorage(i)
+	return tu
+}
+
+// SetNillableMaxStorage sets the "max_storage" field if the given value is not nil.
+func (tu *TeamUpdate) SetNillableMaxStorage(i *int64) *TeamUpdate {
+	if i != nil {
+		tu.SetMaxStorage(*i)
+	}
+	return tu
+}
+
+// AddMaxStorage adds i to the "max_storage" field.
+func (tu *TeamUpdate) AddMaxStorage(i int64) *TeamUpdate {
+	tu.mutation.AddMaxStorage(i)
+	return tu
+}
+
+// ClearMaxStorage clears the value of the "max_storage" field.
+func (tu *TeamUpdate) ClearMaxStorage() *TeamUpdate {
+	tu.mutation.ClearMaxStorage()
+	return tu
+}
+
+// SetStorage sets the "storage" field.
+func (tu *TeamUpdate) SetStorage(i int64) *TeamUpdate {
+	tu.mutation.ResetStorage()
+	tu.mutation.SetStorage(i)
+	return tu
+}
+
+// SetNillableStorage sets the "storage" field if the given value is not nil.
+func (tu *TeamUpdate) SetNillableStorage(i *int64) *TeamUpdate {
+	if i != nil {
+		tu.SetStorage(*i)
+	}
+	return tu
+}
+
+// AddStorage adds i to the "storage" field.
+func (tu *TeamUpdate) AddStorage(i int64) *TeamUpdate {
+	tu.mutation.AddStorage(i)
+	return tu
+}
+
 // SetRootID sets the "root" edge to the File entity by ID.
 func (tu *TeamUpdate) SetRootID(id int) *TeamUpdate {
 	tu.mutation.SetRootID(id)
@@ -220,6 +268,21 @@ func (tu *TeamUpdate) sqlSave(ctx context.Context) (n int, err error) {
 	}
 	if value, ok := tu.mutation.Name(); ok {
 		_spec.SetField(team.FieldName, field.TypeString, value)
+	}
+	if value, ok := tu.mutation.MaxStorage(); ok {
+		_spec.SetField(team.FieldMaxStorage, field.TypeInt64, value)
+	}
+	if value, ok := tu.mutation.AddedMaxStorage(); ok {
+		_spec.AddField(team.FieldMaxStorage, field.TypeInt64, value)
+	}
+	if tu.mutation.MaxStorageCleared() {
+		_spec.ClearField(team.FieldMaxStorage, field.TypeInt64)
+	}
+	if value, ok := tu.mutation.Storage(); ok {
+		_spec.SetField(team.FieldStorage, field.TypeInt64, value)
+	}
+	if value, ok := tu.mutation.AddedStorage(); ok {
+		_spec.AddField(team.FieldStorage, field.TypeInt64, value)
 	}
 	if tu.mutation.RootCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -366,6 +429,54 @@ func (tuo *TeamUpdateOne) SetNillableRootFileID(i *int) *TeamUpdateOne {
 	if i != nil {
 		tuo.SetRootFileID(*i)
 	}
+	return tuo
+}
+
+// SetMaxStorage sets the "max_storage" field.
+func (tuo *TeamUpdateOne) SetMaxStorage(i int64) *TeamUpdateOne {
+	tuo.mutation.ResetMaxStorage()
+	tuo.mutation.SetMaxStorage(i)
+	return tuo
+}
+
+// SetNillableMaxStorage sets the "max_storage" field if the given value is not nil.
+func (tuo *TeamUpdateOne) SetNillableMaxStorage(i *int64) *TeamUpdateOne {
+	if i != nil {
+		tuo.SetMaxStorage(*i)
+	}
+	return tuo
+}
+
+// AddMaxStorage adds i to the "max_storage" field.
+func (tuo *TeamUpdateOne) AddMaxStorage(i int64) *TeamUpdateOne {
+	tuo.mutation.AddMaxStorage(i)
+	return tuo
+}
+
+// ClearMaxStorage clears the value of the "max_storage" field.
+func (tuo *TeamUpdateOne) ClearMaxStorage() *TeamUpdateOne {
+	tuo.mutation.ClearMaxStorage()
+	return tuo
+}
+
+// SetStorage sets the "storage" field.
+func (tuo *TeamUpdateOne) SetStorage(i int64) *TeamUpdateOne {
+	tuo.mutation.ResetStorage()
+	tuo.mutation.SetStorage(i)
+	return tuo
+}
+
+// SetNillableStorage sets the "storage" field if the given value is not nil.
+func (tuo *TeamUpdateOne) SetNillableStorage(i *int64) *TeamUpdateOne {
+	if i != nil {
+		tuo.SetStorage(*i)
+	}
+	return tuo
+}
+
+// AddStorage adds i to the "storage" field.
+func (tuo *TeamUpdateOne) AddStorage(i int64) *TeamUpdateOne {
+	tuo.mutation.AddStorage(i)
 	return tuo
 }
 
@@ -535,6 +646,21 @@ func (tuo *TeamUpdateOne) sqlSave(ctx context.Context) (_node *Team, err error) 
 	}
 	if value, ok := tuo.mutation.Name(); ok {
 		_spec.SetField(team.FieldName, field.TypeString, value)
+	}
+	if value, ok := tuo.mutation.MaxStorage(); ok {
+		_spec.SetField(team.FieldMaxStorage, field.TypeInt64, value)
+	}
+	if value, ok := tuo.mutation.AddedMaxStorage(); ok {
+		_spec.AddField(team.FieldMaxStorage, field.TypeInt64, value)
+	}
+	if tuo.mutation.MaxStorageCleared() {
+		_spec.ClearField(team.FieldMaxStorage, field.TypeInt64)
+	}
+	if value, ok := tuo.mutation.Storage(); ok {
+		_spec.SetField(team.FieldStorage, field.TypeInt64, value)
+	}
+	if value, ok := tuo.mutation.AddedStorage(); ok {
+		_spec.AddField(team.FieldStorage, field.TypeInt64, value)
 	}
 	if tuo.mutation.RootCleared() {
 		edge := &sqlgraph.EdgeSpec{

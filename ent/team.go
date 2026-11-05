@@ -28,6 +28,10 @@ type Team struct {
 	Name string `json:"name,omitempty"`
 	// RootFileID holds the value of the "root_file_id" field.
 	RootFileID int `json:"root_file_id,omitempty"`
+	// MaxStorage holds the value of the "max_storage" field.
+	MaxStorage int64 `json:"max_storage,omitempty"`
+	// Storage holds the value of the "storage" field.
+	Storage int64 `json:"storage,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the TeamQuery when eager-loading is set.
 	Edges        TeamEdges `json:"edges"`
@@ -72,7 +76,7 @@ func (*Team) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case team.FieldID, team.FieldRootFileID:
+		case team.FieldID, team.FieldRootFileID, team.FieldMaxStorage, team.FieldStorage:
 			values[i] = new(sql.NullInt64)
 		case team.FieldName:
 			values[i] = new(sql.NullString)
@@ -129,6 +133,18 @@ func (t *Team) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field root_file_id", values[i])
 			} else if value.Valid {
 				t.RootFileID = int(value.Int64)
+			}
+		case team.FieldMaxStorage:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field max_storage", values[i])
+			} else if value.Valid {
+				t.MaxStorage = value.Int64
+			}
+		case team.FieldStorage:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field storage", values[i])
+			} else if value.Valid {
+				t.Storage = value.Int64
 			}
 		default:
 			t.selectValues.Set(columns[i], values[i])
@@ -192,6 +208,12 @@ func (t *Team) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("root_file_id=")
 	builder.WriteString(fmt.Sprintf("%v", t.RootFileID))
+	builder.WriteString(", ")
+	builder.WriteString("max_storage=")
+	builder.WriteString(fmt.Sprintf("%v", t.MaxStorage))
+	builder.WriteString(", ")
+	builder.WriteString("storage=")
+	builder.WriteString(fmt.Sprintf("%v", t.Storage))
 	builder.WriteByte(')')
 	return builder.String()
 }

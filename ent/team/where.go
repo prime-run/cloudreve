@@ -80,6 +80,16 @@ func RootFileID(v int) predicate.Team {
 	return predicate.Team(sql.FieldEQ(FieldRootFileID, v))
 }
 
+// MaxStorage applies equality check predicate on the "max_storage" field. It's identical to MaxStorageEQ.
+func MaxStorage(v int64) predicate.Team {
+	return predicate.Team(sql.FieldEQ(FieldMaxStorage, v))
+}
+
+// Storage applies equality check predicate on the "storage" field. It's identical to StorageEQ.
+func Storage(v int64) predicate.Team {
+	return predicate.Team(sql.FieldEQ(FieldStorage, v))
+}
+
 // CreatedAtEQ applies the EQ predicate on the "created_at" field.
 func CreatedAtEQ(v time.Time) predicate.Team {
 	return predicate.Team(sql.FieldEQ(FieldCreatedAt, v))
@@ -293,6 +303,96 @@ func RootFileIDIn(vs ...int) predicate.Team {
 // RootFileIDNotIn applies the NotIn predicate on the "root_file_id" field.
 func RootFileIDNotIn(vs ...int) predicate.Team {
 	return predicate.Team(sql.FieldNotIn(FieldRootFileID, vs...))
+}
+
+// MaxStorageEQ applies the EQ predicate on the "max_storage" field.
+func MaxStorageEQ(v int64) predicate.Team {
+	return predicate.Team(sql.FieldEQ(FieldMaxStorage, v))
+}
+
+// MaxStorageNEQ applies the NEQ predicate on the "max_storage" field.
+func MaxStorageNEQ(v int64) predicate.Team {
+	return predicate.Team(sql.FieldNEQ(FieldMaxStorage, v))
+}
+
+// MaxStorageIn applies the In predicate on the "max_storage" field.
+func MaxStorageIn(vs ...int64) predicate.Team {
+	return predicate.Team(sql.FieldIn(FieldMaxStorage, vs...))
+}
+
+// MaxStorageNotIn applies the NotIn predicate on the "max_storage" field.
+func MaxStorageNotIn(vs ...int64) predicate.Team {
+	return predicate.Team(sql.FieldNotIn(FieldMaxStorage, vs...))
+}
+
+// MaxStorageGT applies the GT predicate on the "max_storage" field.
+func MaxStorageGT(v int64) predicate.Team {
+	return predicate.Team(sql.FieldGT(FieldMaxStorage, v))
+}
+
+// MaxStorageGTE applies the GTE predicate on the "max_storage" field.
+func MaxStorageGTE(v int64) predicate.Team {
+	return predicate.Team(sql.FieldGTE(FieldMaxStorage, v))
+}
+
+// MaxStorageLT applies the LT predicate on the "max_storage" field.
+func MaxStorageLT(v int64) predicate.Team {
+	return predicate.Team(sql.FieldLT(FieldMaxStorage, v))
+}
+
+// MaxStorageLTE applies the LTE predicate on the "max_storage" field.
+func MaxStorageLTE(v int64) predicate.Team {
+	return predicate.Team(sql.FieldLTE(FieldMaxStorage, v))
+}
+
+// MaxStorageIsNil applies the IsNil predicate on the "max_storage" field.
+func MaxStorageIsNil() predicate.Team {
+	return predicate.Team(sql.FieldIsNull(FieldMaxStorage))
+}
+
+// MaxStorageNotNil applies the NotNil predicate on the "max_storage" field.
+func MaxStorageNotNil() predicate.Team {
+	return predicate.Team(sql.FieldNotNull(FieldMaxStorage))
+}
+
+// StorageEQ applies the EQ predicate on the "storage" field.
+func StorageEQ(v int64) predicate.Team {
+	return predicate.Team(sql.FieldEQ(FieldStorage, v))
+}
+
+// StorageNEQ applies the NEQ predicate on the "storage" field.
+func StorageNEQ(v int64) predicate.Team {
+	return predicate.Team(sql.FieldNEQ(FieldStorage, v))
+}
+
+// StorageIn applies the In predicate on the "storage" field.
+func StorageIn(vs ...int64) predicate.Team {
+	return predicate.Team(sql.FieldIn(FieldStorage, vs...))
+}
+
+// StorageNotIn applies the NotIn predicate on the "storage" field.
+func StorageNotIn(vs ...int64) predicate.Team {
+	return predicate.Team(sql.FieldNotIn(FieldStorage, vs...))
+}
+
+// StorageGT applies the GT predicate on the "storage" field.
+func StorageGT(v int64) predicate.Team {
+	return predicate.Team(sql.FieldGT(FieldStorage, v))
+}
+
+// StorageGTE applies the GTE predicate on the "storage" field.
+func StorageGTE(v int64) predicate.Team {
+	return predicate.Team(sql.FieldGTE(FieldStorage, v))
+}
+
+// StorageLT applies the LT predicate on the "storage" field.
+func StorageLT(v int64) predicate.Team {
+	return predicate.Team(sql.FieldLT(FieldStorage, v))
+}
+
+// StorageLTE applies the LTE predicate on the "storage" field.
+func StorageLTE(v int64) predicate.Team {
+	return predicate.Team(sql.FieldLTE(FieldStorage, v))
 }
 
 // HasRoot applies the HasEdge predicate on the "root" edge.

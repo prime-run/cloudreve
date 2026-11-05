@@ -229,19 +229,61 @@ func (f *DBFS) List(ctx context.Context, path *fs.URI, opts ...fs.Option) (fs.Fi
 }
 
 func (f *DBFS) Capacity(ctx context.Context, u *ent.User) (*fs.Capacity, error) {
-	// First, get user's available storage packs
-	var (
-		res = &fs.Capacity{}
-	)
+	// Team shared quota when operating in / browsing a team drive.
+	if teamID, ok := inventory.TeamStorageIDFromCtx(ctx); ok {
+		t, err := f.teamClient.GetByID(ctx, teamID)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to get team", err)
+		}
+		return &fs.Capacity{Used: t.Storage, Total: t.MaxStorage}, nil
+	}
 
 	requesterGroup, err := u.Edges.GroupOrErr()
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to get user's group", err)
 	}
 
-	res.Used = f.user.Storage
-	res.Total = requesterGroup.MaxStorage
-	return res, nil
+	return &fs.Capacity{
+		Used:  f.user.Storage,
+		Total: requesterGroup.MaxStorage,
+	}, nil
+}
+
+// commitStorageDiff commits a file tx applying residual storage to user or team.
+func (f *DBFS) commitStorageDiff(ctx context.Context, tx *inventory.Tx) error {
+	return inventory.CommitWithStorageDiffTeam(ctx, tx, f.l, f.userClient, f.teamClient)
+}
+
+// applyStorageDiff applies a storage diff to personal or team quota based on ctx.
+func (f *DBFS) applyStorageDiff(ctx context.Context, diff inventory.StorageDiff) error {
+	if teamID, ok := inventory.TeamStorageIDFromCtx(ctx); ok {
+		residual := inventory.SumStorageDiff(diff)
+		if residual == 0 {
+			return nil
+		}
+		return f.teamClient.ApplyStorageDiff(ctx, teamID, residual)
+	}
+	return f.userClient.ApplyStorageDiff(ctx, diff)
+}
+
+// withTeamStorageCtx injects TeamStorageIDCtx when uri points at a team drive.
+func (f *DBFS) withTeamStorageCtx(ctx context.Context, uri *fs.URI) (context.Context, *ent.Team, error) {
+	if uri == nil || uri.FileSystem() != constants.FileSystemTeam {
+		return ctx, nil, nil
+	}
+	teamHash := uri.ID("")
+	if teamHash == "" {
+		return ctx, nil, nil
+	}
+	teamID, err := f.hasher.Decode(teamHash, hashid.TeamID)
+	if err != nil {
+		return ctx, nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
+	}
+	t, err := f.teamClient.GetByID(ctx, teamID)
+	if err != nil {
+		return ctx, nil, serializer.NewError(serializer.CodeNotFound, "Team not found", err)
+	}
+	return context.WithValue(ctx, inventory.TeamStorageIDCtx{}, teamID), t, nil
 }
 
 func (f *DBFS) CreateEntity(ctx context.Context, file fs.File, policy *ent.StoragePolicy,
@@ -301,7 +343,7 @@ func (f *DBFS) CreateEntity(ctx context.Context, file fs.File, policy *ent.Stora
 	}
 	tx.AppendStorageDiff(storageDiff)
 
-	if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, tx); err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit create change", err)
 	}
 
@@ -647,7 +689,7 @@ func (f *DBFS) createFile(ctx context.Context, parent *File, name string, fileTy
 	}
 
 	tx.AppendStorageDiff(storageDiff)
-	if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, tx); err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit create change", err)
 	}
 

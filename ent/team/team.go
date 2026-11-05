@@ -25,6 +25,10 @@ const (
 	FieldName = "name"
 	// FieldRootFileID holds the string denoting the root_file_id field in the database.
 	FieldRootFileID = "root_file_id"
+	// FieldMaxStorage holds the string denoting the max_storage field in the database.
+	FieldMaxStorage = "max_storage"
+	// FieldStorage holds the string denoting the storage field in the database.
+	FieldStorage = "storage"
 	// EdgeRoot holds the string denoting the root edge name in mutations.
 	EdgeRoot = "root"
 	// EdgeMembers holds the string denoting the members edge name in mutations.
@@ -55,6 +59,8 @@ var Columns = []string{
 	FieldDeletedAt,
 	FieldName,
 	FieldRootFileID,
+	FieldMaxStorage,
+	FieldStorage,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -83,6 +89,8 @@ var (
 	UpdateDefaultUpdatedAt func() time.Time
 	// NameValidator is a validator for the "name" field. It is called by the builders before save.
 	NameValidator func(string) error
+	// DefaultStorage holds the default value on creation for the "storage" field.
+	DefaultStorage int64
 )
 
 // OrderOption defines the ordering options for the Team queries.
@@ -116,6 +124,16 @@ func ByName(opts ...sql.OrderTermOption) OrderOption {
 // ByRootFileID orders the results by the root_file_id field.
 func ByRootFileID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRootFileID, opts...).ToFunc()
+}
+
+// ByMaxStorage orders the results by the max_storage field.
+func ByMaxStorage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMaxStorage, opts...).ToFunc()
+}
+
+// ByStorage orders the results by the storage field.
+func ByStorage(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStorage, opts...).ToFunc()
 }
 
 // ByRootField orders the results by root field.

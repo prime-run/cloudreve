@@ -6,6 +6,7 @@ import (
 
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/ent"
+	"github.com/cloudreve/Cloudreve/v4/ent/teammember"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
@@ -99,6 +100,7 @@ func (service *SingleUserService) Get(c *gin.Context) (*GetUserResponse, error) 
 	dep := dependency.FromContext(c)
 	hasher := dep.HashIDEncoder()
 	userClient := dep.UserClient()
+	teamClient := dep.TeamClient()
 
 	ctx := context.WithValue(c, inventory.LoadUserGroup{}, true)
 	ctx = context.WithValue(ctx, inventory.LoadUserPasskey{}, true)
@@ -114,11 +116,31 @@ func (service *SingleUserService) Get(c *gin.Context) (*GetUserResponse, error) 
 		return nil, serializer.NewError(serializer.CodeInternalSetting, "Failed to get user capacity", err)
 	}
 
+	memberships, err := teamClient.ListByUser(ctx, user.ID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to list user teams", err)
+	}
+
+	teams := lo.FilterMap(memberships, func(m *ent.TeamMember, _ int) (UserTeamMembership, bool) {
+		if m.Edges.Team == nil {
+			return UserTeamMembership{}, false
+		}
+		return UserTeamMembership{
+			ID:   hashid.EncodeTeamID(hasher, m.Edges.Team.ID),
+			Name: m.Edges.Team.Name,
+			Role: string(m.Role),
+		}, true
+	})
+	if teams == nil {
+		teams = []UserTeamMembership{}
+	}
+
 	return &GetUserResponse{
 		User:         user,
 		HashID:       hashid.EncodeUserID(hasher, user.ID),
 		TwoFAEnabled: user.TwoFactorSecret != "",
 		Capacity:     capacity,
+		Teams:        teams,
 	}, nil
 }
 
@@ -137,10 +159,15 @@ func (service *SingleUserService) CalibrateStorage(c *gin.Context) (*GetUserResp
 }
 
 type (
+	UserTeamAssignment struct {
+		ID   string `json:"id" binding:"required"`
+		Role string `json:"role" binding:"required"`
+	}
 	UpsertUserService struct {
-		User     *ent.User `json:"user" binding:"required"`
-		Password string    `json:"password" binding:"omitempty,min=6,max=128"`
-		TwoFA    string    `json:"two_fa"`
+		User     *ent.User            `json:"user" binding:"required"`
+		Password string               `json:"password" binding:"omitempty,min=6,max=128"`
+		TwoFA    string               `json:"two_fa"`
+		Teams    []UserTeamAssignment `json:"teams"`
 	}
 	UpsertUserParamCtx struct{}
 )
@@ -166,6 +193,8 @@ func (s *UpsertUserService) Update(c *gin.Context) (*GetUserResponse, error) {
 
 	dep := dependency.FromContext(c)
 	userClient := dep.UserClient()
+	teamClient := dep.TeamClient()
+	hasher := dep.HashIDEncoder()
 
 	ctx := context.WithValue(c, inventory.LoadUserGroup{}, true)
 	existing, err := userClient.GetByID(ctx, s.User.ID)
@@ -187,6 +216,27 @@ func (s *UpsertUserService) Update(c *gin.Context) (*GetUserResponse, error) {
 	newUser, err := userClient.Upsert(ctx, s.User, s.Password, s.TwoFA)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to update user", err)
+	}
+
+	if s.Teams != nil {
+		memberships := make(map[int]teammember.Role, len(s.Teams))
+		for _, assignment := range s.Teams {
+			teamID, err := hasher.Decode(assignment.ID, hashid.TeamID)
+			if err != nil {
+				return nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
+			}
+			role, err := parseTeamRole(assignment.Role)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := teamClient.GetByID(ctx, teamID); err != nil {
+				return nil, serializer.NewError(serializer.CodeNotFound, "Team not found", err)
+			}
+			memberships[teamID] = role
+		}
+		if err := teamClient.SetUserMemberships(ctx, newUser.ID, memberships); err != nil {
+			return nil, serializer.NewError(serializer.CodeParamErr, err.Error(), err)
+		}
 	}
 
 	service := &SingleUserService{ID: newUser.ID}

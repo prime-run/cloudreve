@@ -15065,6 +15065,10 @@ type TeamMutation struct {
 	updated_at     *time.Time
 	deleted_at     *time.Time
 	name           *string
+	max_storage    *int64
+	addmax_storage *int64
+	storage        *int64
+	addstorage     *int64
 	clearedFields  map[string]struct{}
 	root           *int
 	clearedroot    bool
@@ -15367,6 +15371,132 @@ func (m *TeamMutation) ResetRootFileID() {
 	m.root = nil
 }
 
+// SetMaxStorage sets the "max_storage" field.
+func (m *TeamMutation) SetMaxStorage(i int64) {
+	m.max_storage = &i
+	m.addmax_storage = nil
+}
+
+// MaxStorage returns the value of the "max_storage" field in the mutation.
+func (m *TeamMutation) MaxStorage() (r int64, exists bool) {
+	v := m.max_storage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMaxStorage returns the old "max_storage" field's value of the Team entity.
+// If the Team object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TeamMutation) OldMaxStorage(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMaxStorage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMaxStorage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMaxStorage: %w", err)
+	}
+	return oldValue.MaxStorage, nil
+}
+
+// AddMaxStorage adds i to the "max_storage" field.
+func (m *TeamMutation) AddMaxStorage(i int64) {
+	if m.addmax_storage != nil {
+		*m.addmax_storage += i
+	} else {
+		m.addmax_storage = &i
+	}
+}
+
+// AddedMaxStorage returns the value that was added to the "max_storage" field in this mutation.
+func (m *TeamMutation) AddedMaxStorage() (r int64, exists bool) {
+	v := m.addmax_storage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearMaxStorage clears the value of the "max_storage" field.
+func (m *TeamMutation) ClearMaxStorage() {
+	m.max_storage = nil
+	m.addmax_storage = nil
+	m.clearedFields[team.FieldMaxStorage] = struct{}{}
+}
+
+// MaxStorageCleared returns if the "max_storage" field was cleared in this mutation.
+func (m *TeamMutation) MaxStorageCleared() bool {
+	_, ok := m.clearedFields[team.FieldMaxStorage]
+	return ok
+}
+
+// ResetMaxStorage resets all changes to the "max_storage" field.
+func (m *TeamMutation) ResetMaxStorage() {
+	m.max_storage = nil
+	m.addmax_storage = nil
+	delete(m.clearedFields, team.FieldMaxStorage)
+}
+
+// SetStorage sets the "storage" field.
+func (m *TeamMutation) SetStorage(i int64) {
+	m.storage = &i
+	m.addstorage = nil
+}
+
+// Storage returns the value of the "storage" field in the mutation.
+func (m *TeamMutation) Storage() (r int64, exists bool) {
+	v := m.storage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStorage returns the old "storage" field's value of the Team entity.
+// If the Team object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TeamMutation) OldStorage(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStorage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStorage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStorage: %w", err)
+	}
+	return oldValue.Storage, nil
+}
+
+// AddStorage adds i to the "storage" field.
+func (m *TeamMutation) AddStorage(i int64) {
+	if m.addstorage != nil {
+		*m.addstorage += i
+	} else {
+		m.addstorage = &i
+	}
+}
+
+// AddedStorage returns the value that was added to the "storage" field in this mutation.
+func (m *TeamMutation) AddedStorage() (r int64, exists bool) {
+	v := m.addstorage
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetStorage resets all changes to the "storage" field.
+func (m *TeamMutation) ResetStorage() {
+	m.storage = nil
+	m.addstorage = nil
+}
+
 // SetRootID sets the "root" edge to the File entity by id.
 func (m *TeamMutation) SetRootID(id int) {
 	m.root = &id
@@ -15495,7 +15625,7 @@ func (m *TeamMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TeamMutation) Fields() []string {
-	fields := make([]string, 0, 5)
+	fields := make([]string, 0, 7)
 	if m.created_at != nil {
 		fields = append(fields, team.FieldCreatedAt)
 	}
@@ -15510,6 +15640,12 @@ func (m *TeamMutation) Fields() []string {
 	}
 	if m.root != nil {
 		fields = append(fields, team.FieldRootFileID)
+	}
+	if m.max_storage != nil {
+		fields = append(fields, team.FieldMaxStorage)
+	}
+	if m.storage != nil {
+		fields = append(fields, team.FieldStorage)
 	}
 	return fields
 }
@@ -15529,6 +15665,10 @@ func (m *TeamMutation) Field(name string) (ent.Value, bool) {
 		return m.Name()
 	case team.FieldRootFileID:
 		return m.RootFileID()
+	case team.FieldMaxStorage:
+		return m.MaxStorage()
+	case team.FieldStorage:
+		return m.Storage()
 	}
 	return nil, false
 }
@@ -15548,6 +15688,10 @@ func (m *TeamMutation) OldField(ctx context.Context, name string) (ent.Value, er
 		return m.OldName(ctx)
 	case team.FieldRootFileID:
 		return m.OldRootFileID(ctx)
+	case team.FieldMaxStorage:
+		return m.OldMaxStorage(ctx)
+	case team.FieldStorage:
+		return m.OldStorage(ctx)
 	}
 	return nil, fmt.Errorf("unknown Team field %s", name)
 }
@@ -15592,6 +15736,20 @@ func (m *TeamMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetRootFileID(v)
 		return nil
+	case team.FieldMaxStorage:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMaxStorage(v)
+		return nil
+	case team.FieldStorage:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStorage(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Team field %s", name)
 }
@@ -15600,6 +15758,12 @@ func (m *TeamMutation) SetField(name string, value ent.Value) error {
 // this mutation.
 func (m *TeamMutation) AddedFields() []string {
 	var fields []string
+	if m.addmax_storage != nil {
+		fields = append(fields, team.FieldMaxStorage)
+	}
+	if m.addstorage != nil {
+		fields = append(fields, team.FieldStorage)
+	}
 	return fields
 }
 
@@ -15608,6 +15772,10 @@ func (m *TeamMutation) AddedFields() []string {
 // was not set, or was not defined in the schema.
 func (m *TeamMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
+	case team.FieldMaxStorage:
+		return m.AddedMaxStorage()
+	case team.FieldStorage:
+		return m.AddedStorage()
 	}
 	return nil, false
 }
@@ -15617,6 +15785,20 @@ func (m *TeamMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *TeamMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case team.FieldMaxStorage:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMaxStorage(v)
+		return nil
+	case team.FieldStorage:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddStorage(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Team numeric field %s", name)
 }
@@ -15627,6 +15809,9 @@ func (m *TeamMutation) ClearedFields() []string {
 	var fields []string
 	if m.FieldCleared(team.FieldDeletedAt) {
 		fields = append(fields, team.FieldDeletedAt)
+	}
+	if m.FieldCleared(team.FieldMaxStorage) {
+		fields = append(fields, team.FieldMaxStorage)
 	}
 	return fields
 }
@@ -15644,6 +15829,9 @@ func (m *TeamMutation) ClearField(name string) error {
 	switch name {
 	case team.FieldDeletedAt:
 		m.ClearDeletedAt()
+		return nil
+	case team.FieldMaxStorage:
+		m.ClearMaxStorage()
 		return nil
 	}
 	return fmt.Errorf("unknown Team nullable field %s", name)
@@ -15667,6 +15855,12 @@ func (m *TeamMutation) ResetField(name string) error {
 		return nil
 	case team.FieldRootFileID:
 		m.ResetRootFileID()
+		return nil
+	case team.FieldMaxStorage:
+		m.ResetMaxStorage()
+		return nil
+	case team.FieldStorage:
+		m.ResetStorage()
 		return nil
 	}
 	return fmt.Errorf("unknown Team field %s", name)

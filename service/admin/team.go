@@ -23,14 +23,17 @@ type (
 
 type (
 	CreateTeamService struct {
-		Name string `json:"name" binding:"required,min=1,max=255"`
+		Name       string `json:"name" binding:"required,min=1,max=255"`
+		MaxStorage *int64 `json:"max_storage"`
 	}
 	CreateTeamParamCtx struct{}
 )
 
 type (
 	RenameTeamService struct {
-		Name string `json:"name" binding:"required,min=1,max=255"`
+		Name            string `json:"name" binding:"required,min=1,max=255"`
+		MaxStorage      *int64 `json:"max_storage"`
+		ClearMaxStorage bool   `json:"clear_max_storage"`
 	}
 	RenameTeamParamCtx struct{}
 )
@@ -140,7 +143,7 @@ func (s *CreateTeamService) Create(c *gin.Context) (*GetTeamResponse, error) {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
 	}
 
-	t, err := tc.Create(ctx, name, user.ID, fc)
+	t, err := tc.Create(ctx, name, user.ID, s.MaxStorage, fc)
 	if err != nil {
 		_ = inventory.Rollback(tx)
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create team", err)
@@ -163,9 +166,9 @@ func (s *SingleTeamService) Rename(c *gin.Context, body *RenameTeamService) (*Ge
 		return nil, serializer.NewError(serializer.CodeParamErr, "Name is required", nil)
 	}
 
-	_, err := teamClient.Rename(c, s.ID, name)
+	_, err := teamClient.Update(c, s.ID, name, body.MaxStorage, body.ClearMaxStorage)
 	if err != nil {
-		return nil, serializer.NewError(serializer.CodeDBError, "Failed to rename team", err)
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to update team", err)
 	}
 
 	return s.Get(c)

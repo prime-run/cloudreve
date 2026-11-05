@@ -18,6 +18,11 @@ import (
 )
 
 func (f *DBFS) PreValidateUpload(ctx context.Context, dst *fs.URI, files ...fs.PreValidateFile) error {
+	ctx, _, err := f.withTeamStorageCtx(ctx, dst)
+	if err != nil {
+		return err
+	}
+
 	// Get navigator
 	navigator, err := f.getNavigator(ctx, dst, NavigatorCapabilityUploadFile, NavigatorCapabilityLockFile)
 	if err != nil {
@@ -62,7 +67,7 @@ func (f *DBFS) PreValidateUpload(ctx context.Context, dst *fs.URI, files ...fs.P
 		}
 	}
 
-	// Validate available capacity
+	// Validate available capacity (team shared quota when dst is a team URI)
 	if err := f.validateUserCapacity(ctx, total, dstFile.Owner()); err != nil {
 		return err
 	}
@@ -71,6 +76,11 @@ func (f *DBFS) PreValidateUpload(ctx context.Context, dst *fs.URI, files ...fs.P
 }
 
 func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ...fs.Option) (*fs.UploadSession, error) {
+	ctx, team, err := f.withTeamStorageCtx(ctx, req.Props.Uri)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get navigator.
 	requiredCaps := []NavigatorCapability{NavigatorCapabilityUploadFile, NavigatorCapabilityLockFile}
 	if req.Props.EntityType != nil && *req.Props.EntityType == types.EntityTypeThumbnail {
@@ -156,7 +166,7 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 	owner := ancestor.Owner()
 	capacity, err := f.Capacity(ctx, owner)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user capacity: %s", err)
+		return nil, fmt.Errorf("failed to get capacity: %s", err)
 	}
 	if err := f.validateUserCapacityRaw(ctx, req.Props.Size, capacity); err != nil {
 		return nil, err
@@ -185,7 +195,15 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
 	}
 
-	if err := dbTx.ReserveStorage(ctx, f.userClient, owner.ID, req.Props.Size, capacity.Total); err != nil {
+	if team != nil {
+		if err := dbTx.ReserveTeamStorage(ctx, f.teamClient, team.ID, owner.ID, req.Props.Size, capacity.Total); err != nil {
+			_ = inventory.Rollback(dbTx)
+			if errors.Is(err, inventory.ErrInsufficientCapacity) {
+				return nil, fs.ErrInsufficientCapacity
+			}
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to reserve team storage capacity", err)
+		}
+	} else if err := dbTx.ReserveStorage(ctx, f.userClient, owner.ID, req.Props.Size, capacity.Total); err != nil {
 		_ = inventory.Rollback(dbTx)
 		if errors.Is(err, inventory.ErrInsufficientCapacity) {
 			return nil, fs.ErrInsufficientCapacity
@@ -242,7 +260,7 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 		}
 	}
 
-	if err := inventory.CommitWithStorageDiff(ctx, dbTx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, dbTx); err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit file upload preparation", err)
 	}
 
@@ -277,6 +295,11 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 }
 
 func (f *DBFS) CompleteUpload(ctx context.Context, session *fs.UploadSession) (fs.File, error) {
+	ctx, _, err := f.withTeamStorageCtx(ctx, session.Props.Uri)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get placeholder file
 	file, err := f.Get(ctx, session.Props.Uri, WithFileEntities(), WithNotRoot())
 	if err != nil {
@@ -361,7 +384,7 @@ func (f *DBFS) CompleteUpload(ctx context.Context, session *fs.UploadSession) (f
 		tx.AppendStorageDiff(diff)
 	}
 
-	if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, tx); err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit file change", err)
 	}
 
@@ -387,6 +410,11 @@ func (f *DBFS) CompleteUpload(ctx context.Context, session *fs.UploadSession) (f
 // - File unlocked, upload session valid
 // - File unlocked, upload session not valid
 func (f *DBFS) CancelUploadSession(ctx context.Context, path *fs.URI, sessionID string, session *fs.UploadSession) ([]fs.Entity, *fs.IndexDiff, error) {
+	ctx, _, err := f.withTeamStorageCtx(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// Get placeholder file
 	file, err := f.Get(ctx, path, WithFileEntities(), WithNotRoot())
 	if err != nil {
@@ -461,7 +489,7 @@ func (f *DBFS) CancelUploadSession(ctx context.Context, path *fs.URI, sessionID 
 		return nil, nil, fmt.Errorf("failed to delete placeholder entity: %w", err)
 	}
 
-	if err := f.userClient.ApplyStorageDiff(ctx, storageDiff); err != nil {
+	if err := f.applyStorageDiff(ctx, storageDiff); err != nil {
 		return nil, nil, fmt.Errorf("failed to apply storage diff: %w", err)
 	}
 

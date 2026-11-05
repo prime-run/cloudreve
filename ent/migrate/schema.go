@@ -478,6 +478,8 @@ var (
 		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"mysql": "datetime"}},
 		{Name: "deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"mysql": "datetime"}},
 		{Name: "name", Type: field.TypeString, Size: 255},
+		{Name: "max_storage", Type: field.TypeInt64, Nullable: true},
+		{Name: "storage", Type: field.TypeInt64, Default: 0},
 		{Name: "root_file_id", Type: field.TypeInt},
 	}
 	// TeamsTable holds the schema information for the "teams" table.
@@ -488,7 +490,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "teams_files_root",
-				Columns:    []*schema.Column{TeamsColumns[5]},
+				Columns:    []*schema.Column{TeamsColumns[7]},
 				RefColumns: []*schema.Column{FilesColumns[0]},
 				OnDelete:   schema.NoAction,
 			},

@@ -78,6 +78,34 @@ func (tc *TeamCreate) SetRootFileID(i int) *TeamCreate {
 	return tc
 }
 
+// SetMaxStorage sets the "max_storage" field.
+func (tc *TeamCreate) SetMaxStorage(i int64) *TeamCreate {
+	tc.mutation.SetMaxStorage(i)
+	return tc
+}
+
+// SetNillableMaxStorage sets the "max_storage" field if the given value is not nil.
+func (tc *TeamCreate) SetNillableMaxStorage(i *int64) *TeamCreate {
+	if i != nil {
+		tc.SetMaxStorage(*i)
+	}
+	return tc
+}
+
+// SetStorage sets the "storage" field.
+func (tc *TeamCreate) SetStorage(i int64) *TeamCreate {
+	tc.mutation.SetStorage(i)
+	return tc
+}
+
+// SetNillableStorage sets the "storage" field if the given value is not nil.
+func (tc *TeamCreate) SetNillableStorage(i *int64) *TeamCreate {
+	if i != nil {
+		tc.SetStorage(*i)
+	}
+	return tc
+}
+
 // SetRootID sets the "root" edge to the File entity by ID.
 func (tc *TeamCreate) SetRootID(id int) *TeamCreate {
 	tc.mutation.SetRootID(id)
@@ -155,6 +183,10 @@ func (tc *TeamCreate) defaults() error {
 		v := team.DefaultUpdatedAt()
 		tc.mutation.SetUpdatedAt(v)
 	}
+	if _, ok := tc.mutation.Storage(); !ok {
+		v := team.DefaultStorage
+		tc.mutation.SetStorage(v)
+	}
 	return nil
 }
 
@@ -176,6 +208,9 @@ func (tc *TeamCreate) check() error {
 	}
 	if _, ok := tc.mutation.RootFileID(); !ok {
 		return &ValidationError{Name: "root_file_id", err: errors.New(`ent: missing required field "Team.root_file_id"`)}
+	}
+	if _, ok := tc.mutation.Storage(); !ok {
+		return &ValidationError{Name: "storage", err: errors.New(`ent: missing required field "Team.storage"`)}
 	}
 	if _, ok := tc.mutation.RootID(); !ok {
 		return &ValidationError{Name: "root", err: errors.New(`ent: missing required edge "Team.root"`)}
@@ -229,6 +264,14 @@ func (tc *TeamCreate) createSpec() (*Team, *sqlgraph.CreateSpec) {
 	if value, ok := tc.mutation.Name(); ok {
 		_spec.SetField(team.FieldName, field.TypeString, value)
 		_node.Name = value
+	}
+	if value, ok := tc.mutation.MaxStorage(); ok {
+		_spec.SetField(team.FieldMaxStorage, field.TypeInt64, value)
+		_node.MaxStorage = value
+	}
+	if value, ok := tc.mutation.Storage(); ok {
+		_spec.SetField(team.FieldStorage, field.TypeInt64, value)
+		_node.Storage = value
 	}
 	if nodes := tc.mutation.RootIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -369,6 +412,48 @@ func (u *TeamUpsert) UpdateRootFileID() *TeamUpsert {
 	return u
 }
 
+// SetMaxStorage sets the "max_storage" field.
+func (u *TeamUpsert) SetMaxStorage(v int64) *TeamUpsert {
+	u.Set(team.FieldMaxStorage, v)
+	return u
+}
+
+// UpdateMaxStorage sets the "max_storage" field to the value that was provided on create.
+func (u *TeamUpsert) UpdateMaxStorage() *TeamUpsert {
+	u.SetExcluded(team.FieldMaxStorage)
+	return u
+}
+
+// AddMaxStorage adds v to the "max_storage" field.
+func (u *TeamUpsert) AddMaxStorage(v int64) *TeamUpsert {
+	u.Add(team.FieldMaxStorage, v)
+	return u
+}
+
+// ClearMaxStorage clears the value of the "max_storage" field.
+func (u *TeamUpsert) ClearMaxStorage() *TeamUpsert {
+	u.SetNull(team.FieldMaxStorage)
+	return u
+}
+
+// SetStorage sets the "storage" field.
+func (u *TeamUpsert) SetStorage(v int64) *TeamUpsert {
+	u.Set(team.FieldStorage, v)
+	return u
+}
+
+// UpdateStorage sets the "storage" field to the value that was provided on create.
+func (u *TeamUpsert) UpdateStorage() *TeamUpsert {
+	u.SetExcluded(team.FieldStorage)
+	return u
+}
+
+// AddStorage adds v to the "storage" field.
+func (u *TeamUpsert) AddStorage(v int64) *TeamUpsert {
+	u.Add(team.FieldStorage, v)
+	return u
+}
+
 // UpdateNewValues updates the mutable fields using the new values that were set on create.
 // Using this option is equivalent to using:
 //
@@ -474,6 +559,55 @@ func (u *TeamUpsertOne) SetRootFileID(v int) *TeamUpsertOne {
 func (u *TeamUpsertOne) UpdateRootFileID() *TeamUpsertOne {
 	return u.Update(func(s *TeamUpsert) {
 		s.UpdateRootFileID()
+	})
+}
+
+// SetMaxStorage sets the "max_storage" field.
+func (u *TeamUpsertOne) SetMaxStorage(v int64) *TeamUpsertOne {
+	return u.Update(func(s *TeamUpsert) {
+		s.SetMaxStorage(v)
+	})
+}
+
+// AddMaxStorage adds v to the "max_storage" field.
+func (u *TeamUpsertOne) AddMaxStorage(v int64) *TeamUpsertOne {
+	return u.Update(func(s *TeamUpsert) {
+		s.AddMaxStorage(v)
+	})
+}
+
+// UpdateMaxStorage sets the "max_storage" field to the value that was provided on create.
+func (u *TeamUpsertOne) UpdateMaxStorage() *TeamUpsertOne {
+	return u.Update(func(s *TeamUpsert) {
+		s.UpdateMaxStorage()
+	})
+}
+
+// ClearMaxStorage clears the value of the "max_storage" field.
+func (u *TeamUpsertOne) ClearMaxStorage() *TeamUpsertOne {
+	return u.Update(func(s *TeamUpsert) {
+		s.ClearMaxStorage()
+	})
+}
+
+// SetStorage sets the "storage" field.
+func (u *TeamUpsertOne) SetStorage(v int64) *TeamUpsertOne {
+	return u.Update(func(s *TeamUpsert) {
+		s.SetStorage(v)
+	})
+}
+
+// AddStorage adds v to the "storage" field.
+func (u *TeamUpsertOne) AddStorage(v int64) *TeamUpsertOne {
+	return u.Update(func(s *TeamUpsert) {
+		s.AddStorage(v)
+	})
+}
+
+// UpdateStorage sets the "storage" field to the value that was provided on create.
+func (u *TeamUpsertOne) UpdateStorage() *TeamUpsertOne {
+	return u.Update(func(s *TeamUpsert) {
+		s.UpdateStorage()
 	})
 }
 
@@ -753,6 +887,55 @@ func (u *TeamUpsertBulk) SetRootFileID(v int) *TeamUpsertBulk {
 func (u *TeamUpsertBulk) UpdateRootFileID() *TeamUpsertBulk {
 	return u.Update(func(s *TeamUpsert) {
 		s.UpdateRootFileID()
+	})
+}
+
+// SetMaxStorage sets the "max_storage" field.
+func (u *TeamUpsertBulk) SetMaxStorage(v int64) *TeamUpsertBulk {
+	return u.Update(func(s *TeamUpsert) {
+		s.SetMaxStorage(v)
+	})
+}
+
+// AddMaxStorage adds v to the "max_storage" field.
+func (u *TeamUpsertBulk) AddMaxStorage(v int64) *TeamUpsertBulk {
+	return u.Update(func(s *TeamUpsert) {
+		s.AddMaxStorage(v)
+	})
+}
+
+// UpdateMaxStorage sets the "max_storage" field to the value that was provided on create.
+func (u *TeamUpsertBulk) UpdateMaxStorage() *TeamUpsertBulk {
+	return u.Update(func(s *TeamUpsert) {
+		s.UpdateMaxStorage()
+	})
+}
+
+// ClearMaxStorage clears the value of the "max_storage" field.
+func (u *TeamUpsertBulk) ClearMaxStorage() *TeamUpsertBulk {
+	return u.Update(func(s *TeamUpsert) {
+		s.ClearMaxStorage()
+	})
+}
+
+// SetStorage sets the "storage" field.
+func (u *TeamUpsertBulk) SetStorage(v int64) *TeamUpsertBulk {
+	return u.Update(func(s *TeamUpsert) {
+		s.SetStorage(v)
+	})
+}
+
+// AddStorage adds v to the "storage" field.
+func (u *TeamUpsertBulk) AddStorage(v int64) *TeamUpsertBulk {
+	return u.Update(func(s *TeamUpsert) {
+		s.AddStorage(v)
+	})
+}
+
+// UpdateStorage sets the "storage" field to the value that was provided on create.
+func (u *TeamUpsertBulk) UpdateStorage() *TeamUpsertBulk {
+	return u.Update(func(s *TeamUpsert) {
+		s.UpdateStorage()
 	})
 }
 

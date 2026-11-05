@@ -5,26 +5,33 @@ import (
 	"fmt"
 
 	"github.com/cloudreve/Cloudreve/v4/ent"
+	"github.com/cloudreve/Cloudreve/v4/ent/file"
 	"github.com/cloudreve/Cloudreve/v4/ent/team"
 	"github.com/cloudreve/Cloudreve/v4/ent/teammember"
+	"github.com/cloudreve/Cloudreve/v4/inventory/types"
 	"github.com/cloudreve/Cloudreve/v4/pkg/conf"
 )
 
 type (
-	LoadTeamMembers struct{}
-	LoadTeamRoot    struct{}
+	LoadTeamMembers    struct{}
+	LoadTeamRoot       struct{}
 	LoadTeamMemberUser struct{}
+	// TeamStorageIDCtx marks the current transaction / capacity check as accounting
+	// against a team shared quota instead of the uploading user's personal storage.
+	TeamStorageIDCtx struct{}
 )
 
 type (
 	TeamClient interface {
 		TxOperator
 		// Create creates a team with a root folder owned by ownerID and seeds owner membership.
-		Create(ctx context.Context, name string, ownerID int, fileClient FileClient) (*ent.Team, error)
+		Create(ctx context.Context, name string, ownerID int, maxStorage *int64, fileClient FileClient) (*ent.Team, error)
 		// GetByID returns a team by id.
 		GetByID(ctx context.Context, id int) (*ent.Team, error)
 		// ListTeams returns paginated teams.
 		ListTeams(ctx context.Context, args *ListTeamParameters) (*ListTeamResult, error)
+		// Update updates a team's name and/or max_storage.
+		Update(ctx context.Context, id int, name string, maxStorage *int64, clearMaxStorage bool) (*ent.Team, error)
 		// Rename updates a team's name.
 		Rename(ctx context.Context, id int, name string) (*ent.Team, error)
 		// Delete deletes a team (soft-delete). Caller must ensure root is empty.
@@ -41,6 +48,16 @@ type (
 		RemoveMember(ctx context.Context, teamID, userID int) error
 		// CountOwners returns the number of owners in a team.
 		CountOwners(ctx context.Context, teamID int) (int, error)
+		// SetUserMemberships replaces the user's team memberships with the given set.
+		// teams maps teamID -> role. Teams not listed are removed (except last-owner guard).
+		SetUserMemberships(ctx context.Context, userID int, memberships map[int]teammember.Role) error
+		// ReserveStorage atomically adds size bytes to team teamID's storage while
+		// enforcing an optional quota (maxTotal <= 0 means unlimited).
+		ReserveStorage(ctx context.Context, teamID int, size int64, maxTotal int64) error
+		// ApplyStorageDiff adds diff bytes to team teamID's storage (may be negative).
+		ApplyStorageDiff(ctx context.Context, teamID int, diff int64) error
+		// CalculateStorage recalculates used storage under the team root and updates team.storage.
+		CalculateStorage(ctx context.Context, teamID int) (int64, error)
 	}
 
 	ListTeamParameters struct {
@@ -71,7 +88,7 @@ func (c *teamClient) GetClient() *ent.Client {
 	return c.client
 }
 
-func (c *teamClient) Create(ctx context.Context, name string, ownerID int, fileClient FileClient) (*ent.Team, error) {
+func (c *teamClient) Create(ctx context.Context, name string, ownerID int, maxStorage *int64, fileClient FileClient) (*ent.Team, error) {
 	fc, _ := InheritTx(ctx, fileClient)
 	root, err := fc.CreateFolder(ctx, nil, &CreateFolderParameters{
 		Owner: ownerID,
@@ -81,10 +98,13 @@ func (c *teamClient) Create(ctx context.Context, name string, ownerID int, fileC
 		return nil, fmt.Errorf("failed to create team root folder: %w", err)
 	}
 
-	t, err := c.client.Team.Create().
+	create := c.client.Team.Create().
 		SetName(name).
-		SetRootFileID(root.ID).
-		Save(ctx)
+		SetRootFileID(root.ID)
+	if maxStorage != nil {
+		create.SetMaxStorage(*maxStorage)
+	}
+	t, err := create.Save(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create team: %w", err)
 	}
@@ -138,12 +158,25 @@ func (c *teamClient) ListTeams(ctx context.Context, args *ListTeamParameters) (*
 	}, nil
 }
 
-func (c *teamClient) Rename(ctx context.Context, id int, name string) (*ent.Team, error) {
-	t, err := c.client.Team.UpdateOneID(id).SetName(name).Save(ctx)
+func (c *teamClient) Update(ctx context.Context, id int, name string, maxStorage *int64, clearMaxStorage bool) (*ent.Team, error) {
+	upd := c.client.Team.UpdateOneID(id)
+	if name != "" {
+		upd.SetName(name)
+	}
+	if clearMaxStorage {
+		upd.ClearMaxStorage()
+	} else if maxStorage != nil {
+		upd.SetMaxStorage(*maxStorage)
+	}
+	t, err := upd.Save(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to rename team: %w", err)
+		return nil, fmt.Errorf("failed to update team: %w", err)
 	}
 	return c.GetByID(ctx, t.ID)
+}
+
+func (c *teamClient) Rename(ctx context.Context, id int, name string) (*ent.Team, error) {
+	return c.Update(ctx, id, name, nil, false)
 }
 
 func (c *teamClient) Delete(ctx context.Context, id int) error {
@@ -238,6 +271,142 @@ func (c *teamClient) CountOwners(ctx context.Context, teamID int) (int, error) {
 		teammember.TeamID(teamID),
 		teammember.RoleEQ(teammember.RoleOwner),
 	).Count(ctx)
+}
+
+func (c *teamClient) SetUserMemberships(ctx context.Context, userID int, memberships map[int]teammember.Role) error {
+	existing, err := c.client.TeamMember.Query().Where(teammember.UserID(userID)).All(ctx)
+	if err != nil {
+		return err
+	}
+
+	existingByTeam := make(map[int]*ent.TeamMember, len(existing))
+	for _, m := range existing {
+		existingByTeam[m.TeamID] = m
+	}
+
+	// Upsert desired memberships.
+	for teamID, role := range memberships {
+		if _, err := c.UpsertMember(ctx, teamID, userID, role); err != nil {
+			return err
+		}
+	}
+
+	// Remove memberships no longer listed.
+	for teamID := range existingByTeam {
+		if _, keep := memberships[teamID]; keep {
+			continue
+		}
+		if err := c.RemoveMember(ctx, teamID, userID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *teamClient) ReserveStorage(ctx context.Context, teamID int, size int64, maxTotal int64) error {
+	if size == 0 {
+		return nil
+	}
+	if size < 0 {
+		return c.ApplyStorageDiff(ctx, teamID, size)
+	}
+
+	q := c.client.Team.Update().Where(team.ID(teamID))
+	if maxTotal > 0 {
+		q = q.Where(team.StorageLTE(maxTotal - size))
+	}
+	n, err := q.AddStorage(size).Save(ctx)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrInsufficientCapacity
+	}
+	return nil
+}
+
+func (c *teamClient) ApplyStorageDiff(ctx context.Context, teamID int, diff int64) error {
+	if diff == 0 {
+		return nil
+	}
+	return runWithDeadlockRetry(func() error {
+		return c.client.Team.Update().Where(team.ID(teamID)).AddStorage(diff).Exec(ctx)
+	})
+}
+
+func (c *teamClient) CalculateStorage(ctx context.Context, teamID int) (int64, error) {
+	t, err := c.client.Team.Query().Where(team.ID(teamID)).Only(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	sum, err := c.sumSubtreeEntitySize(ctx, t.RootFileID)
+	if err != nil {
+		return 0, err
+	}
+
+	if _, err := c.client.Team.UpdateOneID(teamID).SetStorage(sum).Save(ctx); err != nil {
+		return 0, err
+	}
+	return sum, nil
+}
+
+// sumSubtreeEntitySize walks the folder tree under rootID and sums entity sizes
+// for every file (same basis as user CalculateStorage).
+func (c *teamClient) sumSubtreeEntitySize(ctx context.Context, rootID int) (int64, error) {
+	queue := []int{rootID}
+	var sum int64
+	batchSize := 500
+
+	for len(queue) > 0 {
+		parentID := queue[0]
+		queue = queue[1:]
+
+		offset := 0
+		for {
+			children, err := c.client.File.Query().
+				Where(file.FileChildren(parentID)).
+				WithEntities().
+				Offset(offset).
+				Limit(batchSize).
+				All(ctx)
+			if err != nil {
+				return 0, fmt.Errorf("failed to list team files: %w", err)
+			}
+			if len(children) == 0 {
+				break
+			}
+			for _, child := range children {
+				if child.Type == int(types.FileTypeFolder) {
+					queue = append(queue, child.ID)
+					continue
+				}
+				for _, e := range child.Edges.Entities {
+					sum += e.Size
+				}
+			}
+			if len(children) < batchSize {
+				break
+			}
+			offset += batchSize
+		}
+	}
+	return sum, nil
+}
+
+// SumStorageDiff returns the total of all values in a StorageDiff.
+func SumStorageDiff(diffs StorageDiff) int64 {
+	var sum int64
+	for _, v := range diffs {
+		sum += v
+	}
+	return sum
+}
+
+// TeamStorageIDFromCtx returns the team ID used for shared storage accounting, if any.
+func TeamStorageIDFromCtx(ctx context.Context) (int, bool) {
+	id, ok := ctx.Value(TeamStorageIDCtx{}).(int)
+	return id, ok && id > 0
 }
 
 func getTeamOrderOption(args *ListTeamParameters) []team.OrderOption {

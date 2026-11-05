@@ -62,6 +62,25 @@ func (t *Tx) ReserveStorage(ctx context.Context, uc UserClient, uid int, size, m
 	return nil
 }
 
+// ReserveTeamStorage atomically adds `size` bytes to team `teamID`'s shared
+// storage while enforcing the team quota. A compensating negative entry is
+// appended to storageDiff (keyed by ownerID) so CreateEntity's positive
+// personal-storage diff nets to zero; CommitWithStorageDiff then redirects
+// the residual (usually 0 for uploads, negative for deletes) onto the team.
+func (t *Tx) ReserveTeamStorage(ctx context.Context, tc TeamClient, teamID, ownerID int, size, maxTotal int64) error {
+	if size <= 0 {
+		return nil
+	}
+
+	txTc, _ := InheritTx(ctx, tc)
+	if err := txTc.ReserveStorage(ctx, teamID, size, maxTotal); err != nil {
+		return err
+	}
+
+	t.AppendStorageDiff(StorageDiff{ownerID: -size})
+	return nil
+}
+
 // AppendStorageDiff appends the given storage diff to the transaction.
 func (t *Tx) AppendStorageDiff(diff StorageDiff) {
 	root := t
@@ -146,13 +165,33 @@ func Commit(tx *Tx) error {
 // against the positive diff CreateEntity appends later. Residual is applied
 // AFTER commit via ApplyStorageDiff (auto-commit, safe to retry on
 // deadlock).
+//
+// When ctx carries TeamStorageIDCtx, residual storage is applied to the team
+// shared quota instead of personal user.Storage (team files must not consume
+// members' personal Group quotas).
 func CommitWithStorageDiff(ctx context.Context, tx *Tx, l logging.Logger, uc UserClient) error {
+	return CommitWithStorageDiffTeam(ctx, tx, l, uc, nil)
+}
+
+// CommitWithStorageDiffTeam is like CommitWithStorageDiff but accepts a TeamClient
+// so residuals can be applied to a team when TeamStorageIDCtx is set.
+func CommitWithStorageDiffTeam(ctx context.Context, tx *Tx, l logging.Logger, uc UserClient, tc TeamClient) error {
 	committed, err := commit(tx)
 	if err != nil {
 		return err
 	}
 
 	if !committed {
+		return nil
+	}
+
+	if teamID, ok := TeamStorageIDFromCtx(ctx); ok && tc != nil {
+		residual := SumStorageDiff(tx.storageDiff)
+		if residual != 0 {
+			if err := tc.ApplyStorageDiff(ctx, teamID, residual); err != nil {
+				l.Error("Failed to apply team storage diff", "error", err, "team_id", teamID)
+			}
+		}
 		return nil
 	}
 

@@ -16,6 +16,13 @@ func (Team) Fields() []ent.Field {
 		field.String("name").
 			MaxLen(255),
 		field.Int("root_file_id"),
+		// MaxStorage is the shared storage quota for the whole team drive (bytes).
+		// Optional: 0 / unset means no limit, matching Group.MaxStorage semantics.
+		field.Int64("max_storage").
+			Optional(),
+		// Storage is the currently used shared storage under the team root (bytes).
+		field.Int64("storage").
+			Default(0),
 	}
 }
 

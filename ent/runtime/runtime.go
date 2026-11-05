@@ -408,6 +408,10 @@ func init() {
 	teamDescName := teamFields[0].Descriptor()
 	// team.NameValidator is a validator for the "name" field. It is called by the builders before save.
 	team.NameValidator = teamDescName.Validators[0].(func(string) error)
+	// teamDescStorage is the schema descriptor for storage field.
+	teamDescStorage := teamFields[3].Descriptor()
+	// team.DefaultStorage holds the default value on creation for the storage field.
+	team.DefaultStorage = teamDescStorage.Default.(int64)
 	teammemberMixin := schema.TeamMember{}.Mixin()
 	teammemberMixinHooks0 := teammemberMixin[0].Hooks()
 	teammember.Hooks[0] = teammemberMixinHooks0[0]
