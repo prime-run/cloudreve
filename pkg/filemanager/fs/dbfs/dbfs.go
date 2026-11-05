@@ -267,6 +267,7 @@ func (f *DBFS) applyStorageDiff(ctx context.Context, diff inventory.StorageDiff)
 }
 
 // withTeamStorageCtx injects TeamStorageIDCtx when uri points at a team drive.
+// Requires the current user to be a member of the team.
 func (f *DBFS) withTeamStorageCtx(ctx context.Context, uri *fs.URI) (context.Context, *ent.Team, error) {
 	if uri == nil || uri.FileSystem() != constants.FileSystemTeam {
 		return ctx, nil, nil
@@ -278,6 +279,14 @@ func (f *DBFS) withTeamStorageCtx(ctx context.Context, uri *fs.URI) (context.Con
 	teamID, err := f.hasher.Decode(teamHash, hashid.TeamID)
 	if err != nil {
 		return ctx, nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
+	}
+	if f.user != nil && !inventory.IsAnonymousUser(f.user) {
+		if _, err := f.teamClient.GetMembership(ctx, teamID, f.user.ID); err != nil {
+			if ent.IsNotFound(err) {
+				return ctx, nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a team member", err)
+			}
+			return ctx, nil, serializer.NewError(serializer.CodeDBError, "Failed to check team membership", err)
+		}
 	}
 	t, err := f.teamClient.GetByID(ctx, teamID)
 	if err != nil {

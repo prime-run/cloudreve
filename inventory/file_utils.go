@@ -121,9 +121,11 @@ func (f *fileClient) childFileQuery(ownerID int, isSymbolic bool, root ...*ent.F
 		// Query children of one single root
 		rawQuery = f.client.File.QueryChildren(root[0])
 	} else if root[0] == nil {
-		// Query orphan files with owner ID
+		// Query orphan files with owner ID. Exclude personal and team roots so they
+		// never appear as trash items when parentless.
 		predicates := []predicate.File{
 			file.NameNEQ(RootFolderName),
+			file.NameNEQ(TeamRootFolderName),
 		}
 
 		if ownerID > 0 {

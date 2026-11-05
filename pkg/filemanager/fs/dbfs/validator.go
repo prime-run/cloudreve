@@ -103,8 +103,9 @@ func (f *DBFS) validateUserCapacity(ctx context.Context, size int64, u *ent.User
 }
 
 // validateUserCapacityRaw validates the user capacity, but does not fetch the capacity.
+// Total <= 0 means unlimited (same semantics as ReserveTeamStorage / Group max_storage).
 func (f *DBFS) validateUserCapacityRaw(ctx context.Context, size int64, capacity *fs.Capacity) error {
-	if capacity.Used+size > capacity.Total {
+	if capacity.Total > 0 && capacity.Used+size > capacity.Total {
 		return fs.ErrInsufficientCapacity
 	}
 	return nil

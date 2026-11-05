@@ -3,9 +3,11 @@ package inventory
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/cloudreve/Cloudreve/v4/ent"
 	"github.com/cloudreve/Cloudreve/v4/ent/file"
+	"github.com/cloudreve/Cloudreve/v4/ent/schema"
 	"github.com/cloudreve/Cloudreve/v4/ent/team"
 	"github.com/cloudreve/Cloudreve/v4/ent/teammember"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
@@ -28,13 +30,16 @@ type (
 		Create(ctx context.Context, name string, ownerID int, maxStorage *int64, fileClient FileClient) (*ent.Team, error)
 		// GetByID returns a team by id.
 		GetByID(ctx context.Context, id int) (*ent.Team, error)
+		// GetByRootFileID returns the team whose root folder is rootFileID.
+		GetByRootFileID(ctx context.Context, rootFileID int) (*ent.Team, error)
 		// ListTeams returns paginated teams.
 		ListTeams(ctx context.Context, args *ListTeamParameters) (*ListTeamResult, error)
 		// Update updates a team's name and/or max_storage.
 		Update(ctx context.Context, id int, name string, maxStorage *int64, clearMaxStorage bool) (*ent.Team, error)
 		// Rename updates a team's name.
 		Rename(ctx context.Context, id int, name string) (*ent.Team, error)
-		// Delete deletes a team (soft-delete). Caller must ensure root is empty.
+		// Delete hard-deletes a team, its members, and the empty root folder in one transaction.
+		// Caller must ensure root is empty.
 		Delete(ctx context.Context, id int) error
 		// CountRootChildren returns number of direct children under the team root folder.
 		CountRootChildren(ctx context.Context, teamID int) (int, error)
@@ -125,6 +130,10 @@ func (c *teamClient) GetByID(ctx context.Context, id int) (*ent.Team, error) {
 	return withTeamEagerLoading(ctx, c.client.Team.Query().Where(team.ID(id))).First(ctx)
 }
 
+func (c *teamClient) GetByRootFileID(ctx context.Context, rootFileID int) (*ent.Team, error) {
+	return withTeamEagerLoading(ctx, c.client.Team.Query().Where(team.RootFileID(rootFileID))).First(ctx)
+}
+
 func (c *teamClient) ListTeams(ctx context.Context, args *ListTeamParameters) (*ListTeamResult, error) {
 	query := withTeamEagerLoading(ctx, c.client.Team.Query())
 	if args.Name != "" {
@@ -180,12 +189,35 @@ func (c *teamClient) Rename(ctx context.Context, id int, name string) (*ent.Team
 }
 
 func (c *teamClient) Delete(ctx context.Context, id int) error {
-	// Soft-delete members first, then the team.
-	if _, err := c.client.TeamMember.Delete().Where(teammember.TeamID(id)).Exec(ctx); err != nil {
+	tc, tx, ctx, err := WithTx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+
+	t, err := tc.client.Team.Query().Where(team.ID(id)).Only(ctx)
+	if err != nil {
+		_ = Rollback(tx)
+		return fmt.Errorf("failed to get team: %w", err)
+	}
+	rootID := t.RootFileID
+
+	// Hard-delete so the root_file_id FK can be cleared before removing the root folder.
+	hardCtx := schema.SkipSoftDelete(ctx)
+	if _, err := tc.client.TeamMember.Delete().Where(teammember.TeamID(id)).Exec(hardCtx); err != nil {
+		_ = Rollback(tx)
 		return fmt.Errorf("failed to delete team members: %w", err)
 	}
-	if err := c.client.Team.DeleteOneID(id).Exec(ctx); err != nil {
+	if err := tc.client.Team.DeleteOneID(id).Exec(hardCtx); err != nil {
+		_ = Rollback(tx)
 		return fmt.Errorf("failed to delete team: %w", err)
+	}
+	if _, err := tc.client.File.Delete().Where(file.IDEQ(rootID)).Exec(ctx); err != nil {
+		_ = Rollback(tx)
+		return fmt.Errorf("failed to delete team root folder: %w", err)
+	}
+
+	if err := Commit(tx); err != nil {
+		return fmt.Errorf("failed to commit team delete: %w", err)
 	}
 	return nil
 }
@@ -274,31 +306,96 @@ func (c *teamClient) CountOwners(ctx context.Context, teamID int) (int, error) {
 }
 
 func (c *teamClient) SetUserMemberships(ctx context.Context, userID int, memberships map[int]teammember.Role) error {
-	existing, err := c.client.TeamMember.Query().Where(teammember.UserID(userID)).All(ctx)
+	tc, tx, ctx, err := WithTx(ctx, c)
 	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+
+	existing, err := tc.client.TeamMember.Query().Where(teammember.UserID(userID)).All(ctx)
+	if err != nil {
+		_ = Rollback(tx)
 		return err
 	}
 
 	existingByTeam := make(map[int]*ent.TeamMember, len(existing))
+	affectedTeams := make(map[int]struct{}, len(existing)+len(memberships))
 	for _, m := range existing {
 		existingByTeam[m.TeamID] = m
+		affectedTeams[m.TeamID] = struct{}{}
+	}
+	for teamID := range memberships {
+		affectedTeams[teamID] = struct{}{}
 	}
 
-	// Upsert desired memberships.
+	teamIDs := make([]int, 0, len(affectedTeams))
+	for id := range affectedTeams {
+		teamIDs = append(teamIDs, id)
+	}
+
+	// Touch team rows to take write locks and serialize concurrent last-owner demotions.
+	if len(teamIDs) > 0 {
+		if _, err := tc.client.Team.Update().
+			Where(team.IDIn(teamIDs...)).
+			SetUpdatedAt(time.Now()).
+			Save(ctx); err != nil {
+			_ = Rollback(tx)
+			return fmt.Errorf("failed to lock teams: %w", err)
+		}
+	}
+
+	// Upsert owner roles first so demotions cannot briefly leave a team ownerless.
 	for teamID, role := range memberships {
-		if _, err := c.UpsertMember(ctx, teamID, userID, role); err != nil {
+		if role != teammember.RoleOwner {
+			continue
+		}
+		if _, err := tc.UpsertMember(ctx, teamID, userID, role); err != nil {
+			_ = Rollback(tx)
+			return err
+		}
+	}
+	for teamID, role := range memberships {
+		if role == teammember.RoleOwner {
+			continue
+		}
+		if _, err := tc.UpsertMember(ctx, teamID, userID, role); err != nil {
+			_ = Rollback(tx)
 			return err
 		}
 	}
 
-	// Remove memberships no longer listed.
 	for teamID := range existingByTeam {
 		if _, keep := memberships[teamID]; keep {
 			continue
 		}
-		if err := c.RemoveMember(ctx, teamID, userID); err != nil {
+		if err := tc.RemoveMember(ctx, teamID, userID); err != nil {
+			_ = Rollback(tx)
 			return err
 		}
+	}
+
+	// Final guard: every touched team that still has members must retain an owner.
+	for teamID := range affectedTeams {
+		members, err := tc.client.TeamMember.Query().Where(teammember.TeamID(teamID)).Count(ctx)
+		if err != nil {
+			_ = Rollback(tx)
+			return err
+		}
+		if members == 0 {
+			continue
+		}
+		owners, err := tc.CountOwners(ctx, teamID)
+		if err != nil {
+			_ = Rollback(tx)
+			return err
+		}
+		if owners < 1 {
+			_ = Rollback(tx)
+			return fmt.Errorf("cannot leave team %d without an owner", teamID)
+		}
+	}
+
+	if err := Commit(tx); err != nil {
+		return fmt.Errorf("failed to commit membership changes: %w", err)
 	}
 	return nil
 }

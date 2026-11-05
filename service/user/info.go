@@ -45,6 +45,12 @@ func GetUserCapacity(c *gin.Context) (*fs.Capacity, error) {
 			if err != nil {
 				return nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
 			}
+			if _, err := dep.TeamClient().GetMembership(ctx, teamID, user.ID); err != nil {
+				if ent.IsNotFound(err) {
+					return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a team member", err)
+				}
+				return nil, serializer.NewError(serializer.CodeDBError, "Failed to check team membership", err)
+			}
 			ctx = context.WithValue(ctx, inventory.TeamStorageIDCtx{}, teamID)
 		}
 	}

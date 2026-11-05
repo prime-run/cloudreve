@@ -20,6 +20,7 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/ent/passkey"
 	"github.com/cloudreve/Cloudreve/v4/ent/schema"
 	"github.com/cloudreve/Cloudreve/v4/ent/task"
+	"github.com/cloudreve/Cloudreve/v4/ent/team"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
 	"github.com/cloudreve/Cloudreve/v4/pkg/serializer"
@@ -324,6 +325,13 @@ func (c *userClient) ReleaseStorage(ctx context.Context, uid int, size int64) er
 }
 
 func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, error) {
+	// Exclude files under any team root so calibrating personal storage does not
+	// count shared team-drive content toward user.storage.
+	teamExclude, err := c.teamFileIDSet(ctx)
+	if err != nil {
+		return 0, err
+	}
+
 	var sum int64
 	batchSize := 30000
 	offset := 0
@@ -344,8 +352,11 @@ func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, erro
 			break
 		}
 
-		for _, file := range allFiles {
-			for _, entity := range file.Edges.Entities {
+		for _, f := range allFiles {
+			if _, underTeam := teamExclude[f.ID]; underTeam {
+				continue
+			}
+			for _, entity := range f.Edges.Entities {
 				sum += entity.Size
 			}
 		}
@@ -358,6 +369,43 @@ func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, erro
 	}
 
 	return sum, nil
+}
+
+// teamFileIDSet returns IDs of all files under any team root (including the roots).
+func (c *userClient) teamFileIDSet(ctx context.Context) (map[int]struct{}, error) {
+	roots, err := c.client.Team.Query().Select(team.FieldRootFileID).All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list team roots: %w", err)
+	}
+	exclude := make(map[int]struct{}, len(roots))
+	queue := make([]int, 0, len(roots))
+	for _, t := range roots {
+		if t.RootFileID == 0 {
+			continue
+		}
+		exclude[t.RootFileID] = struct{}{}
+		queue = append(queue, t.RootFileID)
+	}
+
+	for len(queue) > 0 {
+		parents := queue
+		queue = nil
+		children, err := c.client.File.Query().
+			Where(file.HasParentWith(file.IDIn(parents...))).
+			Select(file.FieldID).
+			All(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to walk team files: %w", err)
+		}
+		for _, ch := range children {
+			if _, ok := exclude[ch.ID]; ok {
+				continue
+			}
+			exclude[ch.ID] = struct{}{}
+			queue = append(queue, ch.ID)
+		}
+	}
+	return exclude, nil
 }
 
 func (c *userClient) SetStatus(ctx context.Context, u *ent.User, status user.Status) (*ent.User, error) {

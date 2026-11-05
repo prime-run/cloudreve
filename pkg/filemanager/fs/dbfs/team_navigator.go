@@ -78,30 +78,32 @@ func (n *teamNavigator) RestoreState(s State) error {
 }
 
 func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
-	if n.root == nil {
-		if inventory.IsAnonymousUser(n.user) {
-			return nil, ErrLoginRequired
-		}
+	if inventory.IsAnonymousUser(n.user) {
+		return nil, ErrLoginRequired
+	}
 
-		teamHash := path.ID("")
-		if teamHash == "" {
-			return nil, fs.ErrPathNotExist.WithError(fmt.Errorf("team id required"))
-		}
+	teamHash := path.ID("")
+	if teamHash == "" {
+		return nil, fs.ErrPathNotExist.WithError(fmt.Errorf("team id required"))
+	}
 
-		teamID, err := n.hasher.Decode(teamHash, hashid.TeamID)
-		if err != nil {
-			return nil, fs.ErrPathNotExist.WithError(fmt.Errorf("invalid team id"))
-		}
+	teamID, err := n.hasher.Decode(teamHash, hashid.TeamID)
+	if err != nil {
+		return nil, fs.ErrPathNotExist.WithError(fmt.Errorf("invalid team id"))
+	}
 
-		membership, err := n.teamClient.GetMembership(ctx, teamID, n.user.ID)
-		if err != nil {
-			if ent.IsNotFound(err) {
-				return nil, ErrPermissionDenied
-			}
-			return nil, fmt.Errorf("failed to get team membership: %w", err)
+	// Re-validate membership on every To so removed members lose access immediately,
+	// including after navigator state restore.
+	if _, err := n.teamClient.GetMembership(ctx, teamID, n.user.ID); err != nil {
+		if ent.IsNotFound(err) {
+			n.root = nil
+			n.team = nil
+			return nil, ErrPermissionDenied
 		}
-		_ = membership
+		return nil, fmt.Errorf("failed to get team membership: %w", err)
+	}
 
+	if n.root == nil || n.team == nil || n.team.ID != teamID {
 		ctx = context.WithValue(ctx, inventory.LoadTeamRoot{}, true)
 		t, err := n.teamClient.GetByID(ctx, teamID)
 		if err != nil {
@@ -127,7 +129,6 @@ func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
 
 	current, lastAncestor := n.root, n.root
 	elements := path.Elements()
-	var err error
 	for index, element := range elements {
 		lastAncestor = current
 		current, err = n.walkNext(ctx, current, element, index == len(elements)-1)

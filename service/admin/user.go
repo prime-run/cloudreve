@@ -213,13 +213,9 @@ func (s *UpsertUserService) Update(c *gin.Context) (*GetUserResponse, error) {
 
 	}
 
-	newUser, err := userClient.Upsert(ctx, s.User, s.Password, s.TwoFA)
-	if err != nil {
-		return nil, serializer.NewError(serializer.CodeDBError, "Failed to update user", err)
-	}
-
+	var memberships map[int]teammember.Role
 	if s.Teams != nil {
-		memberships := make(map[int]teammember.Role, len(s.Teams))
+		memberships = make(map[int]teammember.Role, len(s.Teams))
 		for _, assignment := range s.Teams {
 			teamID, err := hasher.Decode(assignment.ID, hashid.TeamID)
 			if err != nil {
@@ -234,8 +230,33 @@ func (s *UpsertUserService) Update(c *gin.Context) (*GetUserResponse, error) {
 			}
 			memberships[teamID] = role
 		}
-		if err := teamClient.SetUserMemberships(ctx, newUser.ID, memberships); err != nil {
+	}
+
+	var newUser *ent.User
+	if memberships != nil {
+		uc, tx, txCtx, err := inventory.WithTx(ctx, userClient)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
+		}
+		tc, _ := inventory.InheritTx(txCtx, teamClient)
+
+		newUser, err = uc.Upsert(txCtx, s.User, s.Password, s.TwoFA)
+		if err != nil {
+			_ = inventory.Rollback(tx)
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to update user", err)
+		}
+		if err := tc.SetUserMemberships(txCtx, newUser.ID, memberships); err != nil {
+			_ = inventory.Rollback(tx)
 			return nil, serializer.NewError(serializer.CodeParamErr, err.Error(), err)
+		}
+		if err := inventory.Commit(tx); err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit user update", err)
+		}
+	} else {
+		var err error
+		newUser, err = userClient.Upsert(ctx, s.User, s.Password, s.TwoFA)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to update user", err)
 		}
 	}
 
