@@ -2,7 +2,6 @@ package dbfs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -1044,6 +1043,8 @@ func (f *DBFS) moveFiles(ctx context.Context, targets []*File, destination *File
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to get source navigator for FTS team update: %w", err)
 			}
+			// Must visit every file before SetParent: a partial IndexToChangeTeam
+			// leaves unvisited docs on the old team_id after a successful move.
 			if err := srcNav.Walk(ctx, []*File{target}, limit, intsets.MaxInt, func(files []*File, _ int) error {
 				for _, file := range files {
 					if _, ok := file.Metadata()[FullTextIndexKey]; !ok {
@@ -1055,7 +1056,7 @@ func (f *DBFS) moveFiles(ctx context.Context, targets []*File, destination *File
 					})
 				}
 				return nil
-			}); err != nil && !errors.Is(err, ErrFileCountLimitedReached) {
+			}); err != nil {
 				return nil, nil, fmt.Errorf("failed to walk files for FTS team update: %w", err)
 			}
 		}
