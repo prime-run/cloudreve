@@ -111,8 +111,13 @@ func (m *manager) SearchFullText(ctx context.Context, query string, offset int, 
 			if fileURI != nil && fileURI.FileSystem() == constants.FileSystemTeam {
 				return FullTextSearchResult{}, false
 			}
-		} else if fileURI == nil || fileURI.FileSystem() != constants.FileSystemTeam {
-			return FullTextSearchResult{}, false
+		} else {
+			if fileURI == nil || fileURI.FileSystem() != constants.FileSystemTeam {
+				return FullTextSearchResult{}, false
+			}
+			if teamIDFromURI(m.hasher, fileURI) != teamID {
+				return FullTextSearchResult{}, false
+			}
 		}
 
 		return FullTextSearchResult{
