@@ -27,6 +27,8 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/ent/share"
 	"github.com/cloudreve/Cloudreve/v4/ent/storagepolicy"
 	"github.com/cloudreve/Cloudreve/v4/ent/task"
+	"github.com/cloudreve/Cloudreve/v4/ent/team"
+	"github.com/cloudreve/Cloudreve/v4/ent/teammember"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 )
 
@@ -103,6 +105,8 @@ func checkColumn(table, column string) error {
 			share.Table:         share.ValidColumn,
 			storagepolicy.Table: storagepolicy.ValidColumn,
 			task.Table:          task.ValidColumn,
+			team.Table:          team.ValidColumn,
+			teammember.Table:    teammember.ValidColumn,
 			user.Table:          user.ValidColumn,
 		})
 	})

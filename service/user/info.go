@@ -2,6 +2,8 @@ package user
 
 import (
 	"context"
+
+	"github.com/cloudreve/Cloudreve/v4/application/constants"
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/ent"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
@@ -27,7 +29,33 @@ func GetUserCapacity(c *gin.Context) (*fs.Capacity, error) {
 	m := manager.NewFileManager(dep, user)
 	defer m.Recycle()
 
-	return m.Capacity(c)
+	ctx := c.Request.Context()
+	if uriStr := c.Query("uri"); uriStr != "" {
+		uri, err := fs.NewUriFromString(uriStr)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeParamErr, "Invalid uri", err)
+		}
+		if uri.FileSystem() == constants.FileSystemTeam {
+			hasher := dep.HashIDEncoder()
+			teamHash := uri.ID("")
+			if teamHash == "" {
+				return nil, serializer.NewError(serializer.CodeParamErr, "Team id required", nil)
+			}
+			teamID, err := hasher.Decode(teamHash, hashid.TeamID)
+			if err != nil {
+				return nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
+			}
+			if _, err := dep.TeamClient().GetMembership(ctx, teamID, user.ID); err != nil {
+				if ent.IsNotFound(err) {
+					return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a team member", err)
+				}
+				return nil, serializer.NewError(serializer.CodeDBError, "Failed to check team membership", err)
+			}
+			ctx = context.WithValue(ctx, inventory.TeamStorageIDCtx{}, teamID)
+		}
+	}
+
+	return m.Capacity(ctx)
 }
 
 type (

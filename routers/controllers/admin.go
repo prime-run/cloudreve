@@ -664,3 +664,75 @@ func AdminBatchDeleteOAuthClient(c *gin.Context) {
 	}
 	c.JSON(200, serializer.Response{})
 }
+
+func AdminListTeams(c *gin.Context) {
+	service := ParametersFromContext[*admin.AdminListService](c, admin.AdminListServiceParamsCtx{})
+	res, err := service.Teams(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+func AdminGetTeam(c *gin.Context) {
+	service := ParametersFromContext[*admin.SingleTeamService](c, admin.SingleTeamParamCtx{})
+	res, err := service.Get(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+func AdminCreateTeam(c *gin.Context) {
+	service := ParametersFromContext[*admin.CreateTeamService](c, admin.CreateTeamParamCtx{})
+	res, err := service.Create(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+func AdminRenameTeam(c *gin.Context) {
+	teamSvc := ParametersFromContext[*admin.SingleTeamService](c, admin.SingleTeamParamCtx{})
+	body := ParametersFromContext[*admin.RenameTeamService](c, admin.RenameTeamParamCtx{})
+	res, err := teamSvc.Rename(c, body)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+func AdminDeleteTeam(c *gin.Context) {
+	service := ParametersFromContext[*admin.SingleTeamService](c, admin.SingleTeamParamCtx{})
+	err := service.Delete(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{})
+}
+
+func AdminUpsertTeamMember(c *gin.Context) {
+	teamSvc := ParametersFromContext[*admin.SingleTeamService](c, admin.SingleTeamParamCtx{})
+	body := ParametersFromContext[*admin.UpsertTeamMemberService](c, admin.UpsertTeamMemberParamCtx{})
+	res, err := teamSvc.UpsertMember(c, body)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+func AdminRemoveTeamMember(c *gin.Context) {
+	service := ParametersFromContext[*admin.RemoveTeamMemberService](c, admin.RemoveTeamMemberParamCtx{})
+	res, err := service.Remove(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}

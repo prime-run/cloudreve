@@ -352,7 +352,9 @@ func (service *WopiService) FileInfo(c *gin.Context) (*WopiFileInfo, error) {
 		return nil, serializer.NewError(serializer.CodeNotFound, "version not found", nil)
 	}
 
-	canEdit := file.PrimaryEntityID() == targetEntity.ID() && file.OwnerID() == user.ID && uri.FileSystem() == constants.FileSystemMy
+	canEdit := file.PrimaryEntityID() == targetEntity.ID() &&
+		(uri.FileSystem() == constants.FileSystemMy && file.OwnerID() == user.ID ||
+			uri.FileSystem() == constants.FileSystemTeam)
 	cantPutRelative := !canEdit
 	siteUrl := settings.SiteURL(c)
 	info := &WopiFileInfo{

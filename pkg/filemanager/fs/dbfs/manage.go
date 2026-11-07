@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cloudreve/Cloudreve/v4/application/constants"
 	"github.com/cloudreve/Cloudreve/v4/ent"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
@@ -57,7 +58,7 @@ func (f *DBFS) Create(ctx context.Context, path *fs.URI, fileType types.FileType
 			WithError(fmt.Errorf("object with the same name but different type %v already exist", ancestor.Type()))
 	}
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && ancestor.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, ancestor.Owner().ID, path) {
 		return nil, fs.ErrOwnerOnly
 	}
 
@@ -89,8 +90,12 @@ func (f *DBFS) Create(ctx context.Context, path *fs.URI, fileType types.FileType
 		}
 
 		if i < len(desired)-1 || fileType == types.FileTypeFolder {
+			ownerID := ancestor.Model.OwnerID
+			if path.FileSystem() == constants.FileSystemTeam {
+				ownerID = f.user.ID
+			}
 			args := &inventory.CreateFolderParameters{
-				Owner: ancestor.Model.OwnerID,
+				Owner: ownerID,
 				Name:  desired[i],
 			}
 
@@ -162,7 +167,7 @@ func (f *DBFS) Rename(ctx context.Context, path *fs.URI, newName string) (fs.Fil
 	}
 	oldName := target.Name()
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, target.Owner().ID, path) {
 		return nil, nil, fs.ErrOwnerOnly
 	}
 
@@ -248,6 +253,9 @@ func (f *DBFS) Rename(ctx context.Context, path *fs.URI, newName string) (fs.Fil
 }
 
 func (f *DBFS) SoftDelete(ctx context.Context, path ...*fs.URI) error {
+	if err := rejectMixedFilesystemBatch(path); err != nil {
+		return err
+	}
 	ae := serializer.NewAggregateError()
 	targets := make([]*File, 0, len(path))
 	for _, p := range path {
@@ -265,7 +273,7 @@ func (f *DBFS) SoftDelete(ctx context.Context, path ...*fs.URI) error {
 			continue
 		}
 
-		if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+		if !f.ownerAllowed(ctx, target.Owner().ID, p) {
 			ae.Add(p.String(), fs.ErrOwnerOnly.WithError(fmt.Errorf("only file owner can delete file without trash bin")))
 			continue
 		}
@@ -343,6 +351,16 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 	ae := serializer.NewAggregateError()
 	fileNavGroup := make(map[Navigator][]*File)
 	ctx = context.WithValue(ctx, inventory.LoadFileEntity{}, true)
+	if err := rejectMixedFilesystemBatch(path); err != nil {
+		return nil, nil, err
+	}
+	if len(path) > 0 {
+		var err error
+		ctx, _, err = f.withTeamStorageCtx(ctx, path[0])
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 
 	for _, p := range path {
 		// Get navigator
@@ -359,7 +377,7 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 			continue
 		}
 
-		if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !o.SysSkipSoftDelete && !ok && target.Owner().ID != f.user.ID {
+		if !o.SysSkipSoftDelete && !f.ownerAllowed(ctx, target.Owner().ID, p) {
 			ae.Add(p.String(), fs.ErrOwnerOnly)
 			continue
 		}
@@ -403,7 +421,7 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 	}
 
 	tx.AppendStorageDiff(storageDiff)
-	if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, tx); err != nil {
 		return nil, nil, serializer.NewError(serializer.CodeDBError, "Failed to commit delete change", err)
 	}
 	f.emitFileDeleted(ctx, targets...)
@@ -413,6 +431,11 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 }
 
 func (f *DBFS) VersionControl(ctx context.Context, path *fs.URI, versionId int, delete bool) (*fs.IndexDiff, error) {
+	ctx, _, err := f.withTeamStorageCtx(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
 	// Get navigator
 	navigator, err := f.getNavigator(ctx, path, NavigatorCapabilityVersionControl)
 	if err != nil {
@@ -429,7 +452,7 @@ func (f *DBFS) VersionControl(ctx context.Context, path *fs.URI, versionId int, 
 		return nil, fmt.Errorf("failed to get target file: %w", err)
 	}
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, target.Owner().ID, path) {
 		return nil, fs.ErrOwnerOnly
 	}
 
@@ -452,7 +475,7 @@ func (f *DBFS) VersionControl(ctx context.Context, path *fs.URI, versionId int, 
 			return nil, err
 		}
 
-		if err := f.userClient.ApplyStorageDiff(ctx, storageDiff); err != nil {
+		if err := f.applyStorageDiff(ctx, storageDiff); err != nil {
 			f.l.Error("Failed to apply storage diff after deleting version: %s", err)
 		}
 		return nil, nil
@@ -534,6 +557,20 @@ func (f *DBFS) Restore(ctx context.Context, path ...*fs.URI) error {
 }
 
 func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCopy bool) (*fs.IndexDiff, error) {
+	if err := rejectMixedFilesystemBatch(path); err != nil {
+		return nil, err
+	}
+	if len(path) > 0 {
+		mixed := append([]*fs.URI{dst}, path...)
+		if err := rejectMixedFilesystemBatch(mixed); err != nil {
+			return nil, err
+		}
+	}
+	ctx, _, err := f.withTeamStorageCtx(ctx, dst)
+	if err != nil {
+		return nil, err
+	}
+
 	targets := make([]*File, 0, len(path))
 	dstNavigator, err := f.getNavigator(ctx, dst, NavigatorCapabilityLockFile)
 	if err != nil {
@@ -546,7 +583,7 @@ func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCo
 		return nil, fmt.Errorf("faield to get destination folder: %w", err)
 	}
 
-	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && destination.Owner().ID != f.user.ID {
+	if !f.ownerAllowed(ctx, destination.Owner().ID, dst) {
 		return nil, fs.ErrOwnerOnly
 	}
 
@@ -582,7 +619,7 @@ func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCo
 			continue
 		}
 
-		if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); !ok && target.Owner().ID != f.user.ID {
+		if !f.ownerAllowed(ctx, target.Owner().ID, p) {
 			ae.Add(p.String(), fs.ErrOwnerOnly)
 			continue
 		}
@@ -664,7 +701,7 @@ func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCo
 
 		indexDiff.Merge(indexDiffBatch)
 		tx.AppendStorageDiff(storageDiff)
-		if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+		if err := f.commitStorageDiff(ctx, tx); err != nil {
 			return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit move change", err)
 		}
 
@@ -707,21 +744,18 @@ func (f *DBFS) GetFileFromDirectLink(ctx context.Context, dl *ent.DirectLink) (f
 		return nil, fmt.Errorf("failed to find root file: %w", err)
 	}
 
-	if root.Name() != inventory.RootFolderName {
+	switch root.Name() {
+	case inventory.RootFolderName, inventory.TeamRootFolderName:
+		return file, nil
+	default:
 		return nil, serializer.NewError(serializer.CodeNotFound, "direct link not found", err)
 	}
-
-	return file, nil
 }
 
 func (f *DBFS) TraverseFile(ctx context.Context, fileID int) (fs.File, error) {
 	fileModel, err := f.fileClient.GetByID(ctx, fileID)
 	if err != nil {
 		return nil, err
-	}
-
-	if fileModel.OwnerID != f.user.ID && !f.user.Edges.Group.Permissions.Enabled(int(types.GroupPermissionIsAdmin)) {
-		return nil, fs.ErrOwnerOnly.WithError(fmt.Errorf("only file owner can traverse file's uri"))
 	}
 
 	file := newFile(nil, fileModel)
@@ -733,13 +767,40 @@ func (f *DBFS) TraverseFile(ctx context.Context, fileID int) (fs.File, error) {
 		return nil, fmt.Errorf("failed to find root file: %w", err)
 	}
 
+	isAdmin := f.user.Edges.Group.Permissions.Enabled(int(types.GroupPermissionIsAdmin))
+	isOwner := fileModel.OwnerID == f.user.ID
+
 	rootUri := newMyUri()
-	if fileModel.OwnerID != f.user.ID {
+	if !isOwner {
 		rootUri = newMyIDUri(hashid.EncodeUserID(f.hasher, fileModel.OwnerID))
 	}
 
-	if root.Name() != inventory.RootFolderName {
+	switch {
+	case root.Name() == inventory.TeamRootFolderName:
+		t, err := f.teamClient.GetByRootFileID(ctx, root.ID())
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve team root: %w", err)
+		}
+		// Always require membership for team roots (including former uploaders),
+		// so full-text search / file-info cannot leak after removal. Site admins exempt.
+		if !isAdmin {
+			if _, err := f.teamClient.GetMembership(ctx, t.ID, f.user.ID); err != nil {
+				if ent.IsNotFound(err) {
+					return nil, fs.ErrOwnerOnly.WithError(fmt.Errorf("only team members can traverse team file uri"))
+				}
+				return nil, err
+			}
+		}
+		rootUri = newTeamIDUri(hashid.EncodeTeamID(f.hasher, t.ID))
+	case root.Name() != inventory.RootFolderName:
+		if !isOwner && !isAdmin {
+			return nil, fs.ErrOwnerOnly.WithError(fmt.Errorf("only file owner can traverse file's uri"))
+		}
 		rootUri = newTrashUri(root.Name())
+	default:
+		if !isOwner && !isAdmin {
+			return nil, fs.ErrOwnerOnly.WithError(fmt.Errorf("only file owner can traverse file's uri"))
+		}
 	}
 
 	navigator, err := f.getNavigator(ctx, rootUri)
@@ -812,7 +873,7 @@ func (f *DBFS) setCurrentVersion(ctx context.Context, target *File, versionId in
 	}
 
 	tx.AppendStorageDiff(diff)
-	if err := inventory.CommitWithStorageDiff(ctx, tx, f.l, f.userClient); err != nil {
+	if err := f.commitStorageDiff(ctx, tx); err != nil {
 		return serializer.NewError(serializer.CodeDBError, "Failed to commit set current version", err)
 	}
 
@@ -1004,4 +1065,39 @@ func (f *DBFS) moveFiles(ctx context.Context, targets []*File, destination *File
 	}
 
 	return storageDiff, nil, nil
+}
+
+// rejectMixedFilesystemBatch refuses batches that involve a team URI mixed with
+// anything else, or different team drives. Personal my ↔ trash restores are allowed.
+func rejectMixedFilesystemBatch(paths []*fs.URI) error {
+	if len(paths) <= 1 {
+		return nil
+	}
+
+	var teamID string
+	sawTeam := false
+	for _, p := range paths {
+		if p.FileSystem() != constants.FileSystemTeam {
+			continue
+		}
+		id := p.ID("")
+		if !sawTeam {
+			sawTeam = true
+			teamID = id
+			continue
+		}
+		if id != teamID {
+			return serializer.NewError(serializer.CodeParamErr, "Cannot mix paths from different teams in one operation", nil)
+		}
+	}
+	if !sawTeam {
+		return nil
+	}
+
+	for _, p := range paths {
+		if p.FileSystem() != constants.FileSystemTeam || p.ID("") != teamID {
+			return serializer.NewError(serializer.CodeParamErr, "Cannot mix personal and team paths in one operation", nil)
+		}
+	}
+	return nil
 }

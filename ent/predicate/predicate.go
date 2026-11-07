@@ -51,5 +51,11 @@ type StoragePolicy func(*sql.Selector)
 // Task is the predicate function for task builders.
 type Task func(*sql.Selector)
 
+// Team is the predicate function for team builders.
+type Team func(*sql.Selector)
+
+// TeamMember is the predicate function for teammember builders.
+type TeamMember func(*sql.Selector)
+
 // User is the predicate function for user builders.
 type User func(*sql.Selector)

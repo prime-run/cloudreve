@@ -63,11 +63,18 @@ type ListUserResponse struct {
 	Users      []GetUserResponse            `json:"users"`
 }
 
+type UserTeamMembership struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
 type GetUserResponse struct {
 	*ent.User
-	HashID       string       `json:"hash_id,omitempty"`
-	TwoFAEnabled bool         `json:"two_fa_enabled,omitempty"`
-	Capacity     *fs.Capacity `json:"capacity,omitempty"`
+	HashID       string                `json:"hash_id,omitempty"`
+	TwoFAEnabled bool                  `json:"two_fa_enabled,omitempty"`
+	Capacity     *fs.Capacity          `json:"capacity,omitempty"`
+	Teams        []UserTeamMembership `json:"teams"`
 }
 
 type GetNodeResponse struct {

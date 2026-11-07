@@ -76,6 +76,8 @@ type Dep interface {
 	UserClient() inventory.UserClient
 	// GroupClient Creates a new inventory.GroupClient instance for access DB group store.
 	GroupClient() inventory.GroupClient
+	// TeamClient Creates a new inventory.TeamClient instance for access DB team store.
+	TeamClient() inventory.TeamClient
 	// EmailClient Get a singleton email.Driver instance for sending emails.
 	EmailClient(ctx context.Context) email.Driver
 	// GeneralAuth Get a singleton auth.Auth instance for general authentication.
@@ -163,6 +165,7 @@ type dependency struct {
 	settingProvider       setting.Provider
 	userClient            inventory.UserClient
 	groupClient           inventory.GroupClient
+	teamClient            inventory.TeamClient
 	storagePolicyClient   inventory.StoragePolicyClient
 	taskClient            inventory.TaskClient
 	nodeClient            inventory.NodeClient
@@ -508,6 +511,14 @@ func (d *dependency) GroupClient() inventory.GroupClient {
 	}
 
 	return inventory.NewGroupClient(d.DBClient(), d.ConfigProvider().Database().Type, d.KV())
+}
+
+func (d *dependency) TeamClient() inventory.TeamClient {
+	if d.teamClient != nil {
+		return d.teamClient
+	}
+
+	return inventory.NewTeamClient(d.DBClient(), d.ConfigProvider().Database().Type)
 }
 
 func (d *dependency) NodeClient() inventory.NodeClient {
