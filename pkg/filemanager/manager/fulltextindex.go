@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cloudreve/Cloudreve/v4/application/constants"
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/ent"
 	"github.com/cloudreve/Cloudreve/v4/ent/task"
@@ -61,6 +62,12 @@ func (m *manager) SearchFullText(ctx context.Context, query string, offset int) 
 		}
 
 		if file.InTrashBin() {
+			return FullTextSearchResult{}, false
+		}
+
+		// Personal FTS is keyed by uploader; keep team-drive files out of that
+		// result set (they belong to the team workspace, not personal search).
+		if uri := file.Uri(false); uri != nil && uri.FileSystem() == constants.FileSystemTeam {
 			return FullTextSearchResult{}, false
 		}
 

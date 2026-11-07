@@ -247,55 +247,113 @@ func (c *teamClient) GetMembership(ctx context.Context, teamID, userID int) (*en
 	)).First(ctx)
 }
 
+func (c *teamClient) lockTeam(ctx context.Context, teamID int) error {
+	_, err := c.client.Team.Update().
+		Where(team.ID(teamID)).
+		SetUpdatedAt(time.Now()).
+		Save(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to lock team: %w", err)
+	}
+	return nil
+}
+
 func (c *teamClient) UpsertMember(ctx context.Context, teamID, userID int, role teammember.Role) (*ent.TeamMember, error) {
-	existing, err := c.client.TeamMember.Query().Where(
+	tc, tx, ctx, err := WithTx(ctx, c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start transaction: %w", err)
+	}
+
+	if err := tc.lockTeam(ctx, teamID); err != nil {
+		_ = Rollback(tx)
+		return nil, err
+	}
+
+	existing, err := tc.client.TeamMember.Query().Where(
 		teammember.TeamID(teamID),
 		teammember.UserID(userID),
 	).Only(ctx)
 	if err != nil && !ent.IsNotFound(err) {
+		_ = Rollback(tx)
 		return nil, err
 	}
 
+	var member *ent.TeamMember
 	if existing != nil {
 		if existing.Role == teammember.RoleOwner && role != teammember.RoleOwner {
-			owners, err := c.CountOwners(ctx, teamID)
+			owners, err := tc.CountOwners(ctx, teamID)
 			if err != nil {
+				_ = Rollback(tx)
 				return nil, err
 			}
 			if owners <= 1 {
+				_ = Rollback(tx)
 				return nil, fmt.Errorf("cannot demote the last owner")
 			}
 		}
-		return c.client.TeamMember.UpdateOne(existing).SetRole(role).Save(ctx)
+		member, err = tc.client.TeamMember.UpdateOne(existing).SetRole(role).Save(ctx)
+		if err != nil {
+			_ = Rollback(tx)
+			return nil, err
+		}
+	} else {
+		member, err = tc.client.TeamMember.Create().
+			SetTeamID(teamID).
+			SetUserID(userID).
+			SetRole(role).
+			Save(ctx)
+		if err != nil {
+			_ = Rollback(tx)
+			return nil, err
+		}
 	}
 
-	return c.client.TeamMember.Create().
-		SetTeamID(teamID).
-		SetUserID(userID).
-		SetRole(role).
-		Save(ctx)
+	if err := Commit(tx); err != nil {
+		return nil, fmt.Errorf("failed to commit member upsert: %w", err)
+	}
+	return member, nil
 }
 
 func (c *teamClient) RemoveMember(ctx context.Context, teamID, userID int) error {
-	m, err := c.client.TeamMember.Query().Where(
+	tc, tx, ctx, err := WithTx(ctx, c)
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+
+	if err := tc.lockTeam(ctx, teamID); err != nil {
+		_ = Rollback(tx)
+		return err
+	}
+
+	m, err := tc.client.TeamMember.Query().Where(
 		teammember.TeamID(teamID),
 		teammember.UserID(userID),
 	).Only(ctx)
 	if err != nil {
+		_ = Rollback(tx)
 		return err
 	}
 
 	if m.Role == teammember.RoleOwner {
-		owners, err := c.CountOwners(ctx, teamID)
+		owners, err := tc.CountOwners(ctx, teamID)
 		if err != nil {
+			_ = Rollback(tx)
 			return err
 		}
 		if owners <= 1 {
+			_ = Rollback(tx)
 			return fmt.Errorf("cannot remove the last owner")
 		}
 	}
 
-	return c.client.TeamMember.DeleteOne(m).Exec(ctx)
+	if err := tc.client.TeamMember.DeleteOne(m).Exec(ctx); err != nil {
+		_ = Rollback(tx)
+		return err
+	}
+	if err := Commit(tx); err != nil {
+		return fmt.Errorf("failed to commit member remove: %w", err)
+	}
+	return nil
 }
 
 func (c *teamClient) CountOwners(ctx context.Context, teamID int) (int, error) {
@@ -333,13 +391,10 @@ func (c *teamClient) SetUserMemberships(ctx context.Context, userID int, members
 	}
 
 	// Touch team rows to take write locks and serialize concurrent last-owner demotions.
-	if len(teamIDs) > 0 {
-		if _, err := tc.client.Team.Update().
-			Where(team.IDIn(teamIDs...)).
-			SetUpdatedAt(time.Now()).
-			Save(ctx); err != nil {
+	for _, id := range teamIDs {
+		if err := tc.lockTeam(ctx, id); err != nil {
 			_ = Rollback(tx)
-			return fmt.Errorf("failed to lock teams: %w", err)
+			return err
 		}
 	}
 

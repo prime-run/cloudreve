@@ -781,7 +781,9 @@ func (f *DBFS) TraverseFile(ctx context.Context, fileID int) (fs.File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to resolve team root: %w", err)
 		}
-		if !isOwner && !isAdmin {
+		// Always require membership for team roots (including former uploaders),
+		// so full-text search / file-info cannot leak after removal. Site admins exempt.
+		if !isAdmin {
 			if _, err := f.teamClient.GetMembership(ctx, t.ID, f.user.ID); err != nil {
 				if ent.IsNotFound(err) {
 					return nil, fs.ErrOwnerOnly.WithError(fmt.Errorf("only team members can traverse team file uri"))
@@ -1065,20 +1067,36 @@ func (f *DBFS) moveFiles(ctx context.Context, targets []*File, destination *File
 	return storageDiff, nil, nil
 }
 
-// rejectMixedFilesystemBatch refuses batches that mix personal and team URIs
-// (or different team drives), so storage accounting stays unambiguous.
+// rejectMixedFilesystemBatch refuses batches that involve a team URI mixed with
+// anything else, or different team drives. Personal my ↔ trash restores are allowed.
 func rejectMixedFilesystemBatch(paths []*fs.URI) error {
 	if len(paths) <= 1 {
 		return nil
 	}
-	fs0 := paths[0].FileSystem()
-	id0 := paths[0].ID("")
-	for _, p := range paths[1:] {
-		if p.FileSystem() != fs0 {
-			return serializer.NewError(serializer.CodeParamErr, "Cannot mix personal and team paths in one operation", nil)
+
+	var teamID string
+	sawTeam := false
+	for _, p := range paths {
+		if p.FileSystem() != constants.FileSystemTeam {
+			continue
 		}
-		if fs0 == constants.FileSystemTeam && p.ID("") != id0 {
+		id := p.ID("")
+		if !sawTeam {
+			sawTeam = true
+			teamID = id
+			continue
+		}
+		if id != teamID {
 			return serializer.NewError(serializer.CodeParamErr, "Cannot mix paths from different teams in one operation", nil)
+		}
+	}
+	if !sawTeam {
+		return nil
+	}
+
+	for _, p := range paths {
+		if p.FileSystem() != constants.FileSystemTeam || p.ID("") != teamID {
+			return serializer.NewError(serializer.CodeParamErr, "Cannot mix personal and team paths in one operation", nil)
 		}
 	}
 	return nil

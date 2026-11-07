@@ -387,22 +387,31 @@ func (c *userClient) teamFileIDSet(ctx context.Context) (map[int]struct{}, error
 		queue = append(queue, t.RootFileID)
 	}
 
+	// Chunk parent IDs so wide team folders do not exceed DB parameter limits.
+	const parentChunk = 500
 	for len(queue) > 0 {
 		parents := queue
 		queue = nil
-		children, err := c.client.File.Query().
-			Where(file.HasParentWith(file.IDIn(parents...))).
-			Select(file.FieldID).
-			All(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to walk team files: %w", err)
-		}
-		for _, ch := range children {
-			if _, ok := exclude[ch.ID]; ok {
-				continue
+		for start := 0; start < len(parents); start += parentChunk {
+			end := start + parentChunk
+			if end > len(parents) {
+				end = len(parents)
 			}
-			exclude[ch.ID] = struct{}{}
-			queue = append(queue, ch.ID)
+			chunk := parents[start:end]
+			children, err := c.client.File.Query().
+				Where(file.HasParentWith(file.IDIn(chunk...))).
+				Select(file.FieldID).
+				All(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("failed to walk team files: %w", err)
+			}
+			for _, ch := range children {
+				if _, ok := exclude[ch.ID]; ok {
+					continue
+				}
+				exclude[ch.ID] = struct{}{}
+				queue = append(queue, ch.ID)
+			}
 		}
 	}
 	return exclude, nil
