@@ -15,12 +15,10 @@ import (
 
 	"github.com/cloudreve/Cloudreve/v4/ent"
 	"github.com/cloudreve/Cloudreve/v4/ent/davaccount"
-	"github.com/cloudreve/Cloudreve/v4/ent/file"
 	"github.com/cloudreve/Cloudreve/v4/ent/oauthgrant"
 	"github.com/cloudreve/Cloudreve/v4/ent/passkey"
 	"github.com/cloudreve/Cloudreve/v4/ent/schema"
 	"github.com/cloudreve/Cloudreve/v4/ent/task"
-	"github.com/cloudreve/Cloudreve/v4/ent/team"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
 	"github.com/cloudreve/Cloudreve/v4/pkg/serializer"
@@ -325,43 +323,40 @@ func (c *userClient) ReleaseStorage(ctx context.Context, uid int, size int64) er
 }
 
 func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, error) {
-	// Exclude files under any team root so calibrating personal storage does not
-	// count shared team-drive content toward user.storage.
-	teamExclude, err := c.teamFileIDSet(ctx)
+	// Sum entity sizes for this user's personal files in SQL, excluding anything
+	// under a (non-deleted) team root via a recursive CTE — no in-memory team tree.
+	const q = `
+WITH RECURSIVE team_files AS (
+	SELECT root_file_id AS id
+	FROM teams
+	WHERE deleted_at IS NULL AND root_file_id IS NOT NULL AND root_file_id <> 0
+	UNION ALL
+	SELECT f.id
+	FROM files f
+	INNER JOIN team_files tf ON f.file_children = tf.id
+)
+SELECT COALESCE(SUM(e.size), 0)
+FROM files f
+INNER JOIN file_entities fe ON fe.file_id = f.id
+INNER JOIN entities e ON e.id = fe.entity_id
+WHERE f.owner_id = ?
+  AND f.type = ?
+  AND NOT EXISTS (SELECT 1 FROM team_files tf WHERE tf.id = f.id)
+`
+	rows, err := c.client.QueryContext(ctx, q, uid, int(types.FileTypeFile))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to calculate personal storage: %w", err)
 	}
+	defer rows.Close()
 
 	var sum int64
-	batchSize := 30000
-	offset := 0
-
-	for {
-		allFiles, err := c.client.File.Query().
-			Where(file.HasOwnerWith(user.ID(uid))).
-			Where(file.Type(int(types.FileTypeFile))).
-			WithEntities().
-			Offset(offset).
-			Limit(batchSize).
-			All(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("failed to list user files: %w", err)
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, fmt.Errorf("failed to scan personal storage: %w", err)
 		}
-
-		if len(allFiles) == 0 {
-			break
-		}
-
-		for _, f := range allFiles {
-			if _, underTeam := teamExclude[f.ID]; underTeam {
-				continue
-			}
-			for _, entity := range f.Edges.Entities {
-				sum += entity.Size
-			}
-		}
-
-		offset += batchSize
+		sum = 0
+	} else if err := rows.Scan(&sum); err != nil {
+		return 0, fmt.Errorf("failed to scan personal storage: %w", err)
 	}
 
 	if _, err := c.client.User.UpdateOneID(uid).SetStorage(sum).Save(ctx); err != nil {
@@ -369,52 +364,6 @@ func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, erro
 	}
 
 	return sum, nil
-}
-
-// teamFileIDSet returns IDs of all files under any team root (including the roots).
-func (c *userClient) teamFileIDSet(ctx context.Context) (map[int]struct{}, error) {
-	roots, err := c.client.Team.Query().Select(team.FieldRootFileID).All(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list team roots: %w", err)
-	}
-	exclude := make(map[int]struct{}, len(roots))
-	queue := make([]int, 0, len(roots))
-	for _, t := range roots {
-		if t.RootFileID == 0 {
-			continue
-		}
-		exclude[t.RootFileID] = struct{}{}
-		queue = append(queue, t.RootFileID)
-	}
-
-	// Chunk parent IDs so wide team folders do not exceed DB parameter limits.
-	const parentChunk = 500
-	for len(queue) > 0 {
-		parents := queue
-		queue = nil
-		for start := 0; start < len(parents); start += parentChunk {
-			end := start + parentChunk
-			if end > len(parents) {
-				end = len(parents)
-			}
-			chunk := parents[start:end]
-			children, err := c.client.File.Query().
-				Where(file.HasParentWith(file.IDIn(chunk...))).
-				Select(file.FieldID).
-				All(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("failed to walk team files: %w", err)
-			}
-			for _, ch := range children {
-				if _, ok := exclude[ch.ID]; ok {
-					continue
-				}
-				exclude[ch.ID] = struct{}{}
-				queue = append(queue, ch.ID)
-			}
-		}
-	}
-	return exclude, nil
 }
 
 func (c *userClient) SetStatus(ctx context.Context, u *ent.User, status user.Status) (*ent.User, error) {

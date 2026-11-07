@@ -41,7 +41,7 @@ func NewMeilisearchIndexer(msCfg *setting.FTSIndexMeilisearchSetting, chunkSize 
 }
 
 var (
-	requiredFilterable = []string{"owner_id", "file_id", "entity_id"}
+	requiredFilterable = []string{"owner_id", "file_id", "entity_id", "team_id"}
 	requiredSearchable = []string{"text", "file_name"}
 	requiredDistinct   = "file_id"
 )
@@ -98,7 +98,7 @@ func (m *MeilisearchIndexer) EnsureIndex(ctx context.Context) error {
 
 	index := m.client.Index(indexName)
 
-	filterableAttrs := []any{"owner_id", "file_id", "entity_id"}
+	filterableAttrs := []any{"owner_id", "file_id", "entity_id", "team_id"}
 	if _, err := index.UpdateFilterableAttributesWithContext(ctx, &filterableAttrs); err != nil {
 		return fmt.Errorf("failed to set filterable attributes: %w", err)
 	}
@@ -138,7 +138,7 @@ func (m *MeilisearchIndexer) EnsureIndex(ctx context.Context) error {
 	return nil
 }
 
-func (m *MeilisearchIndexer) IndexFile(ctx context.Context, ownerID, fileID, entityID int, fileName, text string) error {
+func (m *MeilisearchIndexer) IndexFile(ctx context.Context, ownerID, fileID, entityID, teamID int, fileName, text string) error {
 	chunks := ChunkText(text, m.chunkSize)
 	if len(chunks) == 0 {
 		return nil
@@ -150,6 +150,7 @@ func (m *MeilisearchIndexer) IndexFile(ctx context.Context, ownerID, fileID, ent
 			ID:       fmt.Sprintf("%d_%d", fileID, i),
 			FileID:   fileID,
 			OwnerID:  ownerID,
+			TeamID:   teamID,
 			EntityID: entityID,
 			ChunkIdx: i,
 			FileName: fileName,
@@ -230,7 +231,7 @@ func (m *MeilisearchIndexer) ChangeOwner(ctx context.Context, fileID, oldOwnerID
 	return nil
 }
 
-func (m *MeilisearchIndexer) CopyByFileID(ctx context.Context, srcFileID, dstFileID, dstOwnerID, dstEntityID int) error {
+func (m *MeilisearchIndexer) CopyByFileID(ctx context.Context, srcFileID, dstFileID, dstOwnerID, dstEntityID, dstTeamID int) error {
 	index := m.client.Index(indexName)
 	filter := fmt.Sprintf("file_id = %d", srcFileID)
 
@@ -273,6 +274,7 @@ func (m *MeilisearchIndexer) CopyByFileID(ctx context.Context, srcFileID, dstFil
 		allDocs[i].ID = fmt.Sprintf("%d_%d", dstFileID, allDocs[i].ChunkIdx)
 		allDocs[i].FileID = dstFileID
 		allDocs[i].OwnerID = dstOwnerID
+		allDocs[i].TeamID = dstTeamID
 		allDocs[i].EntityID = dstEntityID
 	}
 
@@ -330,11 +332,16 @@ func (m *MeilisearchIndexer) Rename(ctx context.Context, fileID, entityID int, n
 	return nil
 }
 
-func (m *MeilisearchIndexer) Search(ctx context.Context, ownerID int, query string, offset int) ([]searcher.SearchResult, int64, error) {
+func (m *MeilisearchIndexer) Search(ctx context.Context, ownerID, teamID int, query string, offset int) ([]searcher.SearchResult, int64, error) {
 	index := m.client.Index(indexName)
 
+	filter := fmt.Sprintf("owner_id = %d AND team_id = 0", ownerID)
+	if teamID > 0 {
+		filter = fmt.Sprintf("team_id = %d", teamID)
+	}
+
 	searchReq := &meilisearch.SearchRequest{
-		Filter:                fmt.Sprintf("owner_id = %d", ownerID),
+		Filter:                filter,
 		Limit:                 int64(m.pageSize),
 		Offset:                int64(offset),
 		AttributesToHighlight: []string{"text"},

@@ -9,6 +9,8 @@ type SearchDocument struct {
 	ID       string       `json:"id"`
 	FileID   int          `json:"file_id"`
 	OwnerID  int          `json:"owner_id"`
+	// TeamID is the team workspace this document belongs to; 0 means personal.
+	TeamID   int          `json:"team_id"`
 	EntityID int          `json:"entity_id"`
 	ChunkIdx int          `json:"chunk_idx"`
 	FileName string       `json:"file_name"`
@@ -29,12 +31,16 @@ type SearchResult struct {
 }
 
 type SearchIndexer interface {
-	IndexFile(ctx context.Context, ownerID, fileID, entityID int, fileName, text string) error
+	// IndexFile indexes file text. teamID 0 means personal; non-zero scopes the doc to a team drive.
+	IndexFile(ctx context.Context, ownerID, fileID, entityID, teamID int, fileName, text string) error
 	DeleteByFileIDs(ctx context.Context, fileID ...int) error
 	ChangeOwner(ctx context.Context, fileID, oldOwnerID, newOwnerID int) error
-	CopyByFileID(ctx context.Context, srcFileID, dstFileID, dstOwnerID, dstEntityID int) error
+	// CopyByFileID copies indexed chunks to a new file. dstTeamID 0 means personal.
+	CopyByFileID(ctx context.Context, srcFileID, dstFileID, dstOwnerID, dstEntityID, dstTeamID int) error
 	Rename(ctx context.Context, fileID, entityID int, newFileName string) error
-	Search(ctx context.Context, ownerID int, query string, offset int) ([]SearchResult, int64, error)
+	// Search filters by owner when teamID==0 (personal: owner_id AND team_id=0),
+	// or by team_id when teamID>0 (team-scoped content search).
+	Search(ctx context.Context, ownerID, teamID int, query string, offset int) ([]SearchResult, int64, error)
 	// IndexReady reports whether the search index exists and has the required
 	// configuration (filterable/searchable attributes, etc.).
 	IndexReady(ctx context.Context) (bool, error)

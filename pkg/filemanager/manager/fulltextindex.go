@@ -41,19 +41,51 @@ type (
 	}
 )
 
-func (m *manager) SearchFullText(ctx context.Context, query string, offset int) (*FullTextSearchResults, error) {
+func teamIDFromURI(hasher hashid.Encoder, uri *fs.URI) int {
+	if uri == nil || uri.FileSystem() != constants.FileSystemTeam {
+		return 0
+	}
+	hash := uri.ID("")
+	if hash == "" {
+		return 0
+	}
+	id, err := hasher.Decode(hash, hashid.TeamID)
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+func (m *manager) SearchFullText(ctx context.Context, query string, offset int, uri *fs.URI) (*FullTextSearchResults, error) {
+	teamID := 0
+	if uri != nil && uri.FileSystem() == constants.FileSystemTeam {
+		teamHash := uri.ID("")
+		if teamHash == "" {
+			return nil, fmt.Errorf("team id required")
+		}
+		decoded, err := m.hasher.Decode(teamHash, hashid.TeamID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid team id: %w", err)
+		}
+		if _, err := m.dep.TeamClient().GetMembership(ctx, decoded, m.user.ID); err != nil {
+			if ent.IsNotFound(err) {
+				return nil, fmt.Errorf("not a team member")
+			}
+			return nil, fmt.Errorf("failed to check team membership: %w", err)
+		}
+		teamID = decoded
+	}
+
 	indexer := m.dep.SearchIndexer(ctx)
-	results, total, err := indexer.Search(ctx, m.user.ID, query, offset)
+	results, total, err := indexer.Search(ctx, m.user.ID, teamID, query, offset)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search full text: %w", err)
 	}
 
 	if len(results) == 0 {
-		// No results.
 		return &FullTextSearchResults{}, nil
 	}
 
-	// Traverse each file in result
 	files := lo.FilterMap(results, func(result searcher.SearchResult, _ int) (FullTextSearchResult, bool) {
 		file, err := m.TraverseFile(ctx, result.FileID)
 		if err != nil {
@@ -65,9 +97,13 @@ func (m *manager) SearchFullText(ctx context.Context, query string, offset int) 
 			return FullTextSearchResult{}, false
 		}
 
-		// Personal FTS is keyed by uploader; keep team-drive files out of that
-		// result set (they belong to the team workspace, not personal search).
-		if uri := file.Uri(false); uri != nil && uri.FileSystem() == constants.FileSystemTeam {
+		fileURI := file.Uri(false)
+		if teamID == 0 {
+			// Personal search must not surface team-drive files.
+			if fileURI != nil && fileURI.FileSystem() == constants.FileSystemTeam {
+				return FullTextSearchResult{}, false
+			}
+		} else if fileURI == nil || fileURI.FileSystem() != constants.FileSystemTeam {
 			return FullTextSearchResult{}, false
 		}
 
@@ -78,8 +114,7 @@ func (m *manager) SearchFullText(ctx context.Context, query string, offset int) 
 	})
 
 	if len(files) == 0 {
-		// No valid files, run next offset
-		return m.SearchFullText(ctx, query, offset+len(results))
+		return m.SearchFullText(ctx, query, offset+len(results), uri)
 	}
 
 	return &FullTextSearchResults{
@@ -203,7 +238,8 @@ func (t *FullTextCopyTask) Do(ctx context.Context) (task.Status, error) {
 	}
 
 	indexer := dep.SearchIndexer(ctx)
-	if err := indexer.CopyByFileID(ctx, state.OriginalFileID, state.FileID, state.OwnerID, state.EntityID); err != nil {
+	dstTeamID := teamIDFromURI(fm.hasher, state.Uri)
+	if err := indexer.CopyByFileID(ctx, state.OriginalFileID, state.FileID, state.OwnerID, state.EntityID, dstTeamID); err != nil {
 		l.Warning("Failed to copy index from file %d to %d, falling back to full indexing: %s", state.OriginalFileID, state.FileID, err)
 		return performIndexing(ctx, fm, state.Uri, state.EntityID, state.FileID, state.OwnerID, file.Name(), false)
 	}
@@ -433,7 +469,8 @@ func performIndexing(ctx context.Context, fm *manager, uri *fs.URI, entityID, fi
 	}
 
 	// Index via SearchIndexer
-	if err := indexer.IndexFile(ctx, ownerID, fileID, entityID, fileName, text); err != nil {
+	teamID := teamIDFromURI(fm.hasher, uri)
+	if err := indexer.IndexFile(ctx, ownerID, fileID, entityID, teamID, fileName, text); err != nil {
 		return task.StatusError, fmt.Errorf("failed to index file %d: %w", fileID, err)
 	}
 

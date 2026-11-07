@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cloudreve/Cloudreve/v4/application/constants"
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
@@ -767,6 +768,7 @@ type (
 	FulltextSearchService  struct {
 		Query  string `form:"query" binding:"required"`
 		Offset int    `form:"offset"`
+		Uri    string `form:"uri"`
 	}
 )
 
@@ -776,8 +778,20 @@ func (s *FulltextSearchService) Search(c *gin.Context) (*FullTextSearchResults, 
 	m := manager.NewFileManager(dep, user)
 	defer m.Recycle()
 
-	results, err := m.SearchFullText(c, s.Query, s.Offset)
+	var searchURI *fs.URI
+	if s.Uri != "" {
+		uri, err := fs.NewUriFromString(s.Uri)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeParamErr, "Invalid uri", err)
+		}
+		searchURI = uri
+	}
+
+	results, err := m.SearchFullText(c, s.Query, s.Offset, searchURI)
 	if err != nil {
+		if searchURI != nil && searchURI.FileSystem() == constants.FileSystemTeam {
+			return nil, serializer.NewError(serializer.CodeNoPermissionErr, "failed to search full text", err)
+		}
 		return nil, serializer.NewError(serializer.CodeInternalSetting, "failed to search full text", err)
 	}
 
