@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/cloudreve/Cloudreve/v4/ent"
@@ -389,6 +390,8 @@ func (c *teamClient) SetUserMemberships(ctx context.Context, userID int, members
 	for id := range affectedTeams {
 		teamIDs = append(teamIDs, id)
 	}
+	// Stable lock order so overlapping SetUserMemberships cannot deadlock.
+	sort.Ints(teamIDs)
 
 	// Touch team rows to take write locks and serialize concurrent last-owner demotions.
 	for _, id := range teamIDs {
