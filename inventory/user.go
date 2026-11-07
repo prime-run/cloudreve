@@ -325,12 +325,15 @@ func (c *userClient) ReleaseStorage(ctx context.Context, uid int, size int64) er
 }
 
 func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, error) {
-	// Exclude files under any team root so calibrating personal storage does not
-	// count shared team-drive content toward user.storage.
-	teamExclude, err := c.teamFileIDSet(ctx)
+	// Exclude team-drive bytes from personal storage. Only walk ancestors of this
+	// user's files (memoized); never BFS every team tree on the instance.
+	teamRoots, err := c.teamRootIDSet(ctx)
 	if err != nil {
 		return 0, err
 	}
+
+	underTeam := make(map[int]bool)
+	parentOf := make(map[int]int)
 
 	var sum int64
 	batchSize := 30000
@@ -340,20 +343,23 @@ func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, erro
 		allFiles, err := c.client.File.Query().
 			Where(file.HasOwnerWith(user.ID(uid))).
 			Where(file.Type(int(types.FileTypeFile))).
-			WithEntities().
+			WithEntities(). // soft-deleted entities are filtered by the mixin interceptor
 			Offset(offset).
 			Limit(batchSize).
 			All(ctx)
 		if err != nil {
 			return 0, fmt.Errorf("failed to list user files: %w", err)
 		}
-
 		if len(allFiles) == 0 {
 			break
 		}
 
 		for _, f := range allFiles {
-			if _, underTeam := teamExclude[f.ID]; underTeam {
+			exclude, err := c.fileUnderTeam(ctx, f.ID, f.FileChildren, teamRoots, underTeam, parentOf)
+			if err != nil {
+				return 0, err
+			}
+			if exclude {
 				continue
 			}
 			for _, entity := range f.Edges.Entities {
@@ -371,50 +377,74 @@ func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, erro
 	return sum, nil
 }
 
-// teamFileIDSet returns IDs of all files under any team root (including the roots).
-func (c *userClient) teamFileIDSet(ctx context.Context) (map[int]struct{}, error) {
+// teamRootIDSet returns non-zero root_file_id values for active (non-soft-deleted) teams.
+func (c *userClient) teamRootIDSet(ctx context.Context) (map[int]struct{}, error) {
 	roots, err := c.client.Team.Query().Select(team.FieldRootFileID).All(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list team roots: %w", err)
 	}
-	exclude := make(map[int]struct{}, len(roots))
-	queue := make([]int, 0, len(roots))
+	out := make(map[int]struct{}, len(roots))
 	for _, t := range roots {
 		if t.RootFileID == 0 {
 			continue
 		}
-		exclude[t.RootFileID] = struct{}{}
-		queue = append(queue, t.RootFileID)
+		out[t.RootFileID] = struct{}{}
+	}
+	return out, nil
+}
+
+// fileUnderTeam reports whether fileID sits under a team root, walking parents
+// with underTeam/parentOf memoization so each ancestor is resolved at most once.
+func (c *userClient) fileUnderTeam(
+	ctx context.Context,
+	fileID, parentID int,
+	teamRoots map[int]struct{},
+	underTeam map[int]bool,
+	parentOf map[int]int,
+) (bool, error) {
+	if v, ok := underTeam[fileID]; ok {
+		return v, nil
+	}
+	if _, ok := teamRoots[fileID]; ok {
+		underTeam[fileID] = true
+		return true, nil
+	}
+	if parentID == 0 {
+		underTeam[fileID] = false
+		return false, nil
+	}
+	if _, ok := teamRoots[parentID]; ok {
+		underTeam[fileID] = true
+		return true, nil
+	}
+	if v, ok := underTeam[parentID]; ok {
+		underTeam[fileID] = v
+		return v, nil
 	}
 
-	// Chunk parent IDs so wide team folders do not exceed DB parameter limits.
-	const parentChunk = 500
-	for len(queue) > 0 {
-		parents := queue
-		queue = nil
-		for start := 0; start < len(parents); start += parentChunk {
-			end := start + parentChunk
-			if end > len(parents) {
-				end = len(parents)
+	grandParent, cached := parentOf[parentID]
+	if !cached {
+		p, err := c.client.File.Query().
+			Where(file.ID(parentID)).
+			Select(file.FieldID, file.FieldFileChildren).
+			Only(ctx)
+		if err != nil {
+			if ent.IsNotFound(err) {
+				underTeam[fileID] = false
+				return false, nil
 			}
-			chunk := parents[start:end]
-			children, err := c.client.File.Query().
-				Where(file.HasParentWith(file.IDIn(chunk...))).
-				Select(file.FieldID).
-				All(ctx)
-			if err != nil {
-				return nil, fmt.Errorf("failed to walk team files: %w", err)
-			}
-			for _, ch := range children {
-				if _, ok := exclude[ch.ID]; ok {
-					continue
-				}
-				exclude[ch.ID] = struct{}{}
-				queue = append(queue, ch.ID)
-			}
+			return false, fmt.Errorf("failed to resolve parent %d: %w", parentID, err)
 		}
+		grandParent = p.FileChildren
+		parentOf[parentID] = grandParent
 	}
-	return exclude, nil
+
+	v, err := c.fileUnderTeam(ctx, parentID, grandParent, teamRoots, underTeam, parentOf)
+	if err != nil {
+		return false, err
+	}
+	underTeam[fileID] = v
+	return v, nil
 }
 
 func (c *userClient) SetStatus(ctx context.Context, u *ent.User, status user.Status) (*ent.User, error) {

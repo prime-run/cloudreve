@@ -691,7 +691,7 @@ func (f *DBFS) MoveOrCopy(ctx context.Context, path []*fs.URI, dst *fs.URI, isCo
 		if isCopy {
 			copiedNewTargetsMap, storageDiff, indexDiffBatch, err = f.copyFiles(ctx, fileNavGroup, destination, fc)
 		} else {
-			storageDiff, indexDiffBatch, err = f.moveFiles(ctx, targets, destination, fc, dstNavigator)
+			storageDiff, indexDiffBatch, err = f.moveFiles(ctx, targets, destination, fc)
 		}
 
 		if err != nil {
@@ -1025,10 +1025,42 @@ func (f *DBFS) copyFiles(ctx context.Context, targets map[Navigator][]*File, des
 	return newTargetsMap, storageDiff, indexDiff, nil
 }
 
-func (f *DBFS) moveFiles(ctx context.Context, targets []*File, destination *File, fc inventory.FileClient, n Navigator) (inventory.StorageDiff, *fs.IndexDiff, error) {
+func (f *DBFS) moveFiles(ctx context.Context, targets []*File, destination *File, fc inventory.FileClient) (inventory.StorageDiff, *fs.IndexDiff, error) {
 	models := lo.Map(targets, func(value *File, key int) *ent.File {
 		return value.Model
 	})
+
+	dstTeamID := teamIDFromFileURI(f.hasher, destination.Uri(false))
+	indexToChangeTeam := make([]fs.IndexDiffTeamChangeDetails, 0)
+	if f.user.Edges.Group != nil {
+		limit := max(f.user.Edges.Group.Settings.MaxWalkedFiles, 1)
+		for _, target := range targets {
+			srcTeamID := teamIDFromFileURI(f.hasher, target.Uri(false))
+			if srcTeamID == dstTeamID {
+				continue
+			}
+			srcNav, err := f.getNavigator(ctx, target.Uri(false))
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to get source navigator for FTS team update: %w", err)
+			}
+			// Must visit every file before SetParent: a partial IndexToChangeTeam
+			// leaves unvisited docs on the old team_id after a successful move.
+			if err := srcNav.Walk(ctx, []*File{target}, limit, intsets.MaxInt, func(files []*File, _ int) error {
+				for _, file := range files {
+					if _, ok := file.Metadata()[FullTextIndexKey]; !ok {
+						continue
+					}
+					indexToChangeTeam = append(indexToChangeTeam, fs.IndexDiffTeamChangeDetails{
+						FileID: file.ID(),
+						TeamID: dstTeamID,
+					})
+				}
+				return nil
+			}); err != nil {
+				return nil, nil, fmt.Errorf("failed to walk files for FTS team update: %w", err)
+			}
+		}
+	}
 
 	// Change targets' parent
 	if err := fc.SetParent(ctx, models, destination.Model); err != nil {
@@ -1064,7 +1096,28 @@ func (f *DBFS) moveFiles(ctx context.Context, targets []*File, destination *File
 		}
 	}
 
-	return storageDiff, nil, nil
+	var indexDiff *fs.IndexDiff
+	if len(indexToChangeTeam) > 0 {
+		indexDiff = &fs.IndexDiff{IndexToChangeTeam: indexToChangeTeam}
+	}
+
+	return storageDiff, indexDiff, nil
+}
+
+// teamIDFromFileURI decodes the team id from a team-drive URI; personal/other FS → 0.
+func teamIDFromFileURI(hasher hashid.Encoder, uri *fs.URI) int {
+	if uri == nil || uri.FileSystem() != constants.FileSystemTeam {
+		return 0
+	}
+	hash := uri.ID("")
+	if hash == "" {
+		return 0
+	}
+	id, err := hasher.Decode(hash, hashid.TeamID)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 // rejectMixedFilesystemBatch refuses batches that involve a team URI mixed with
