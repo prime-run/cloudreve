@@ -3,11 +3,11 @@ package explorer
 import (
 	"context"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
-	"github.com/cloudreve/Cloudreve/v4/application/constants"
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
@@ -789,7 +789,7 @@ func (s *FulltextSearchService) Search(c *gin.Context) (*FullTextSearchResults, 
 
 	results, err := m.SearchFullText(c, s.Query, s.Offset, searchURI)
 	if err != nil {
-		if searchURI != nil && searchURI.FileSystem() == constants.FileSystemTeam {
+		if errors.Is(err, manager.ErrFullTextNotTeamMember) || errors.Is(err, manager.ErrFullTextInvalidTeamURI) {
 			return nil, serializer.NewError(serializer.CodeNoPermissionErr, "failed to search full text", err)
 		}
 		return nil, serializer.NewError(serializer.CodeInternalSetting, "failed to search full text", err)

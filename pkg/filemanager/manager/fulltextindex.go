@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/cloudreve/Cloudreve/v4/application/constants"
@@ -56,20 +57,27 @@ func teamIDFromURI(hasher hashid.Encoder, uri *fs.URI) int {
 	return id
 }
 
+var (
+	// ErrFullTextNotTeamMember is returned when the caller is not a member of the team in uri.
+	ErrFullTextNotTeamMember = errors.New("not a team member")
+	// ErrFullTextInvalidTeamURI is returned for a team uri that is missing/invalid.
+	ErrFullTextInvalidTeamURI = errors.New("invalid team uri")
+)
+
 func (m *manager) SearchFullText(ctx context.Context, query string, offset int, uri *fs.URI) (*FullTextSearchResults, error) {
 	teamID := 0
 	if uri != nil && uri.FileSystem() == constants.FileSystemTeam {
 		teamHash := uri.ID("")
 		if teamHash == "" {
-			return nil, fmt.Errorf("team id required")
+			return nil, ErrFullTextInvalidTeamURI
 		}
 		decoded, err := m.hasher.Decode(teamHash, hashid.TeamID)
 		if err != nil {
-			return nil, fmt.Errorf("invalid team id: %w", err)
+			return nil, fmt.Errorf("%w: %v", ErrFullTextInvalidTeamURI, err)
 		}
 		if _, err := m.dep.TeamClient().GetMembership(ctx, decoded, m.user.ID); err != nil {
 			if ent.IsNotFound(err) {
-				return nil, fmt.Errorf("not a team member")
+				return nil, ErrFullTextNotTeamMember
 			}
 			return nil, fmt.Errorf("failed to check team membership: %w", err)
 		}
@@ -578,6 +586,11 @@ func (m *manager) processIndexDiff(ctx context.Context, diff *fs.IndexDiff) {
 		for _, rename := range diff.IndexToRename {
 			if err := indexer.Rename(ctx, rename.FileID, rename.EntityID, rename.Uri.Name()); err != nil {
 				m.l.Warning("Failed to rename index for file %d: %s", rename.FileID, err)
+			}
+		}
+		for _, change := range diff.IndexToChangeTeam {
+			if err := indexer.ChangeTeamID(ctx, change.FileID, change.TeamID); err != nil {
+				m.l.Warning("Failed to update team_id in index for file %d: %s", change.FileID, err)
 			}
 		}
 	}()

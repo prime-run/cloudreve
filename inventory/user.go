@@ -15,10 +15,12 @@ import (
 
 	"github.com/cloudreve/Cloudreve/v4/ent"
 	"github.com/cloudreve/Cloudreve/v4/ent/davaccount"
+	"github.com/cloudreve/Cloudreve/v4/ent/file"
 	"github.com/cloudreve/Cloudreve/v4/ent/oauthgrant"
 	"github.com/cloudreve/Cloudreve/v4/ent/passkey"
 	"github.com/cloudreve/Cloudreve/v4/ent/schema"
 	"github.com/cloudreve/Cloudreve/v4/ent/task"
+	"github.com/cloudreve/Cloudreve/v4/ent/team"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
 	"github.com/cloudreve/Cloudreve/v4/pkg/serializer"
@@ -323,40 +325,49 @@ func (c *userClient) ReleaseStorage(ctx context.Context, uid int, size int64) er
 }
 
 func (c *userClient) CalculateStorage(ctx context.Context, uid int) (int64, error) {
-	// Sum entity sizes for this user's personal files in SQL, excluding anything
-	// under a (non-deleted) team root via a recursive CTE — no in-memory team tree.
-	const q = `
-WITH RECURSIVE team_files AS (
-	SELECT root_file_id AS id
-	FROM teams
-	WHERE deleted_at IS NULL AND root_file_id IS NOT NULL AND root_file_id <> 0
-	UNION ALL
-	SELECT f.id
-	FROM files f
-	INNER JOIN team_files tf ON f.file_children = tf.id
-)
-SELECT COALESCE(SUM(e.size), 0)
-FROM files f
-INNER JOIN file_entities fe ON fe.file_id = f.id
-INNER JOIN entities e ON e.id = fe.entity_id
-WHERE f.owner_id = ?
-  AND f.type = ?
-  AND NOT EXISTS (SELECT 1 FROM team_files tf WHERE tf.id = f.id)
-`
-	rows, err := c.client.QueryContext(ctx, q, uid, int(types.FileTypeFile))
+	// Exclude team-drive bytes from personal storage. Only walk ancestors of this
+	// user's files (memoized); never BFS every team tree on the instance.
+	teamRoots, err := c.teamRootIDSet(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to calculate personal storage: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
+
+	underTeam := make(map[int]bool)
+	parentOf := make(map[int]int)
 
 	var sum int64
-	if !rows.Next() {
-		if err := rows.Err(); err != nil {
-			return 0, fmt.Errorf("failed to scan personal storage: %w", err)
+	batchSize := 30000
+	offset := 0
+
+	for {
+		allFiles, err := c.client.File.Query().
+			Where(file.HasOwnerWith(user.ID(uid))).
+			Where(file.Type(int(types.FileTypeFile))).
+			WithEntities(). // soft-deleted entities are filtered by the mixin interceptor
+			Offset(offset).
+			Limit(batchSize).
+			All(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("failed to list user files: %w", err)
 		}
-		sum = 0
-	} else if err := rows.Scan(&sum); err != nil {
-		return 0, fmt.Errorf("failed to scan personal storage: %w", err)
+		if len(allFiles) == 0 {
+			break
+		}
+
+		for _, f := range allFiles {
+			exclude, err := c.fileUnderTeam(ctx, f.ID, f.FileChildren, teamRoots, underTeam, parentOf)
+			if err != nil {
+				return 0, err
+			}
+			if exclude {
+				continue
+			}
+			for _, entity := range f.Edges.Entities {
+				sum += entity.Size
+			}
+		}
+
+		offset += batchSize
 	}
 
 	if _, err := c.client.User.UpdateOneID(uid).SetStorage(sum).Save(ctx); err != nil {
@@ -364,6 +375,76 @@ WHERE f.owner_id = ?
 	}
 
 	return sum, nil
+}
+
+// teamRootIDSet returns non-zero root_file_id values for active (non-soft-deleted) teams.
+func (c *userClient) teamRootIDSet(ctx context.Context) (map[int]struct{}, error) {
+	roots, err := c.client.Team.Query().Select(team.FieldRootFileID).All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list team roots: %w", err)
+	}
+	out := make(map[int]struct{}, len(roots))
+	for _, t := range roots {
+		if t.RootFileID == 0 {
+			continue
+		}
+		out[t.RootFileID] = struct{}{}
+	}
+	return out, nil
+}
+
+// fileUnderTeam reports whether fileID sits under a team root, walking parents
+// with underTeam/parentOf memoization so each ancestor is resolved at most once.
+func (c *userClient) fileUnderTeam(
+	ctx context.Context,
+	fileID, parentID int,
+	teamRoots map[int]struct{},
+	underTeam map[int]bool,
+	parentOf map[int]int,
+) (bool, error) {
+	if v, ok := underTeam[fileID]; ok {
+		return v, nil
+	}
+	if _, ok := teamRoots[fileID]; ok {
+		underTeam[fileID] = true
+		return true, nil
+	}
+	if parentID == 0 {
+		underTeam[fileID] = false
+		return false, nil
+	}
+	if _, ok := teamRoots[parentID]; ok {
+		underTeam[fileID] = true
+		return true, nil
+	}
+	if v, ok := underTeam[parentID]; ok {
+		underTeam[fileID] = v
+		return v, nil
+	}
+
+	grandParent, cached := parentOf[parentID]
+	if !cached {
+		p, err := c.client.File.Query().
+			Where(file.ID(parentID)).
+			Select(file.FieldID, file.FieldFileChildren).
+			Only(ctx)
+		if err != nil {
+			if ent.IsNotFound(err) {
+				underTeam[fileID] = false
+				return false, nil
+			}
+			return false, fmt.Errorf("failed to resolve parent %d: %w", parentID, err)
+		}
+		grandParent = p.FileChildren
+		parentOf[parentID] = grandParent
+	}
+
+	v, err := c.fileUnderTeam(ctx, parentID, grandParent, teamRoots, underTeam, parentOf)
+	if err != nil {
+		return false, err
+	}
+	underTeam[fileID] = v
+	return v, nil
 }
 
 func (c *userClient) SetStatus(ctx context.Context, u *ent.User, status user.Status) (*ent.User, error) {

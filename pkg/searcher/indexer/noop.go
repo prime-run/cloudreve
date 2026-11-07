@@ -21,6 +21,10 @@ func (n *NoopIndexer) ChangeOwner(ctx context.Context, fileID, oldOwnerID, newOw
 	return nil
 }
 
+func (n *NoopIndexer) ChangeTeamID(ctx context.Context, fileID, teamID int) error {
+	return nil
+}
+
 func (n *NoopIndexer) CopyByFileID(ctx context.Context, srcFileID, dstFileID, dstOwnerID, dstEntityID, dstTeamID int) error {
 	return nil
 }
