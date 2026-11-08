@@ -27,6 +27,7 @@ type UserLoginService struct {
 
 // Login 用户登录函数
 func (service *UserLoginService) Login(c *gin.Context) (*ent.User, string, error) {
+	service.UserName = util.NormalizeUsername(service.UserName)
 	if err := util.ValidateUsername(service.UserName); err != nil {
 		return nil, "", serializer.NewError(serializer.CodeParamErr, err.Error(), err)
 	}
@@ -160,6 +161,7 @@ type (
 )
 
 func (service *PrepareLoginService) Prepare(c *gin.Context) (*PrepareLoginResponse, error) {
+	service.Username = util.NormalizeUsername(service.Username)
 	if err := util.ValidateUsername(service.Username); err != nil {
 		return nil, serializer.NewError(serializer.CodeParamErr, err.Error(), err)
 	}

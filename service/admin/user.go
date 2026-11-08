@@ -176,6 +176,7 @@ func (s *UpsertUserService) validateUsername() error {
 	if s.User == nil {
 		return serializer.NewError(serializer.CodeParamErr, "Username is required", nil)
 	}
+	s.User.Username = util.NormalizeUsername(s.User.Username)
 	if err := util.ValidateUsername(s.User.Username); err != nil {
 		return serializer.NewError(serializer.CodeParamErr, err.Error(), err)
 	}

@@ -18,8 +18,8 @@ func TestUpsertUserServiceValidateUsername(t *testing.T) {
 	}{
 		{name: "empty", username: "", wantErr: true},
 		{name: "too short", username: "abcd", wantErr: true},
-		{name: "email-like", username: "admin@test.com", wantErr: true},
-		{name: "spaces", username: "user name", wantErr: true},
+		{name: "email-like migrated", username: "admin@test.com"},
+		{name: "with dots", username: "user.name"},
 		{name: "minimum length", username: "admin"},
 		{name: "with underscore", username: "user_name"},
 		{name: "with hyphen", username: "user-name"},

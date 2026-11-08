@@ -15,6 +15,7 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/ent/oauthclient"
 	"github.com/cloudreve/Cloudreve/v4/ent/setting"
 	"github.com/cloudreve/Cloudreve/v4/ent/storagepolicy"
+	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory/debug"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
 	"github.com/cloudreve/Cloudreve/v4/pkg/boolset"
@@ -40,6 +41,16 @@ func migrate(l logging.Logger, client *ent.Client, ctx context.Context, kv cache
 	l.Info("Creating basic table schema...")
 	if err := client.Schema.Create(ctx); err != nil {
 		return fmt.Errorf("Failed creating schema resources: %w", err)
+	}
+
+	// Copy expose_user_email → expose_user_username before defaults insert the
+	// new key as "1", which would discard an operator's prior "0".
+	if err := migrateExposeUsernameSetting(l, client, ctx); err != nil {
+		return fmt.Errorf("failed migrating expose_user_username setting: %w", err)
+	}
+
+	if err := normalizeUsernamesAndActivate(l, client, ctx); err != nil {
+		return fmt.Errorf("failed normalizing usernames: %w", err)
 	}
 
 	migrateDefaultSettings(l, client, ctx, kv)
@@ -616,55 +627,160 @@ var patches = []Patch{
 			return nil
 		},
 	},
-	{
-		Name:       "rename_expose_user_email_setting",
-		EndVersion: "4.16.0",
-		Func: func(l logging.Logger, client *ent.Client, ctx context.Context) error {
-			old, err := client.Setting.Query().Where(setting.Name("expose_user_email")).First(ctx)
-			if err != nil {
-				if ent.IsNotFound(err) {
-					return nil
-				}
-				return fmt.Errorf("failed to query expose_user_email: %w", err)
-			}
-			_, err = client.Setting.Query().Where(setting.Name("expose_user_username")).First(ctx)
-			if err == nil {
-				_, _ = client.Setting.Delete().Where(setting.Name("expose_user_email")).Exec(ctx)
-				return nil
-			}
-			if !ent.IsNotFound(err) {
-				return err
-			}
-			if err := client.Setting.Create().SetName("expose_user_username").SetValue(old.Value).Exec(ctx); err != nil {
-				return fmt.Errorf("failed to create expose_user_username: %w", err)
-			}
-			_, _ = client.Setting.Delete().Where(setting.Name("expose_user_email")).Exec(ctx)
+}
+
+// migrateExposeUsernameSetting copies expose_user_email into expose_user_username
+// (preserving "0") then drops the old key. Idempotent.
+func migrateExposeUsernameSetting(l logging.Logger, client *ent.Client, ctx context.Context) error {
+	old, err := client.Setting.Query().Where(setting.Name("expose_user_email")).First(ctx)
+	if err != nil {
+		if ent.IsNotFound(err) {
 			return nil
-		},
-	},
+		}
+		return fmt.Errorf("failed to query expose_user_email: %w", err)
+	}
+
+	existing, err := client.Setting.Query().Where(setting.Name("expose_user_username")).First(ctx)
+	if err == nil {
+		// Overwrite the default "1" with the operator's previous choice.
+		if existing.Value != old.Value {
+			if _, err := client.Setting.UpdateOne(existing).SetValue(old.Value).Save(ctx); err != nil {
+				return fmt.Errorf("failed to update expose_user_username: %w", err)
+			}
+		}
+	} else if ent.IsNotFound(err) {
+		if err := client.Setting.Create().SetName("expose_user_username").SetValue(old.Value).Exec(ctx); err != nil {
+			return fmt.Errorf("failed to create expose_user_username: %w", err)
+		}
+	} else {
+		return err
+	}
+
+	if _, err := client.Setting.Delete().Where(setting.Name("expose_user_email")).Exec(ctx); err != nil {
+		return fmt.Errorf("failed to delete expose_user_email: %w", err)
+	}
+	l.Info("Migrated expose_user_email → expose_user_username (value=%s).", old.Value)
+	return nil
+}
+
+// normalizeUsernamesAndActivate lowercases usernames for case-insensitive uniqueness
+// and activates accounts left inactive by the removed email-activation flow.
+func normalizeUsernamesAndActivate(l logging.Logger, client *ent.Client, ctx context.Context) error {
+	users, err := client.User.Query().All(ctx)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]int, len(users))
+	for _, u := range users {
+		normalized := util.NormalizeUsername(u.Username)
+		if normalized == "" {
+			continue
+		}
+		if otherID, ok := seen[normalized]; ok && otherID != u.ID {
+			return fmt.Errorf("case-only duplicate usernames %q (ids %d and %d); resolve before migrating", normalized, otherID, u.ID)
+		}
+		seen[normalized] = u.ID
+
+		upd := client.User.UpdateOneID(u.ID)
+		changed := false
+		if u.Username != normalized {
+			upd.SetUsername(normalized)
+			changed = true
+		}
+		if u.Status == user.StatusInactive {
+			upd.SetStatus(user.StatusActive)
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		if _, err := upd.Save(ctx); err != nil {
+			return fmt.Errorf("failed to normalize user %d: %w", u.ID, err)
+		}
+	}
+	return nil
 }
 
 // renameUserEmailColumn renames users.email to users.username when the old column
-// still exists. Safe no-op on fresh installs and already-migrated DBs.
+// still exists. Safe no-op when the table is missing or already migrated.
 func renameUserEmailColumn(l logging.Logger, client *ent.Client, ctx context.Context) error {
-	_, err := client.ExecContext(ctx, `ALTER TABLE users RENAME COLUMN email TO username`)
-	if err == nil {
-		l.Info("Renamed users.email column to username.")
+	hasEmail, hasUsername, tableExists, err := inspectUserIdentityColumns(ctx, client)
+	if err != nil {
+		return err
+	}
+	if !tableExists {
+		l.Debug("Skip renaming users.email: users table does not exist yet.")
 		return nil
 	}
-	msg := strings.ToLower(err.Error())
-	// Column already renamed, table missing (fresh install), or dialect quirks.
-	if strings.Contains(msg, "does not exist") ||
-		strings.Contains(msg, "no such column") ||
-		strings.Contains(msg, "unknown column") ||
-		strings.Contains(msg, "can't find") ||
-		strings.Contains(msg, "cannot find") ||
-		strings.Contains(msg, "duplicate column") ||
-		strings.Contains(msg, "already exists") {
-		l.Debug("Skip renaming users.email: %s", err)
+	if !hasEmail {
+		l.Debug("Skip renaming users.email: column already gone.")
 		return nil
 	}
-	return err
+	if hasUsername {
+		return fmt.Errorf("users table has both email and username columns; resolve manually before migrating")
+	}
+
+	if _, err := client.ExecContext(ctx, `ALTER TABLE users RENAME COLUMN email TO username`); err != nil {
+		return err
+	}
+	l.Info("Renamed users.email column to username.")
+	return nil
+}
+
+// inspectUserIdentityColumns reports whether users.email / users.username exist.
+func inspectUserIdentityColumns(ctx context.Context, client *ent.Client) (hasEmail, hasUsername, tableExists bool, err error) {
+	// SQLite
+	rows, qerr := client.QueryContext(ctx, `PRAGMA table_info(users)`)
+	if qerr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, ctype string
+			var dflt any
+			if scanErr := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); scanErr != nil {
+				return false, false, false, scanErr
+			}
+			tableExists = true
+			switch strings.ToLower(name) {
+			case "email":
+				hasEmail = true
+			case "username":
+				hasUsername = true
+			}
+		}
+		return hasEmail, hasUsername, tableExists, rows.Err()
+	}
+
+	// Postgres / MySQL
+	rows, qerr = client.QueryContext(ctx, `
+SELECT column_name
+FROM information_schema.columns
+WHERE lower(table_name) = 'users'
+  AND lower(column_name) IN ('email', 'username')`)
+	if qerr != nil {
+		msg := strings.ToLower(qerr.Error())
+		if strings.Contains(msg, "no such table") ||
+			strings.Contains(msg, "does not exist") ||
+			strings.Contains(msg, "doesn't exist") {
+			return false, false, false, nil
+		}
+		return false, false, false, qerr
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if scanErr := rows.Scan(&name); scanErr != nil {
+			return false, false, false, scanErr
+		}
+		tableExists = true
+		switch strings.ToLower(name) {
+		case "email":
+			hasEmail = true
+		case "username":
+			hasUsername = true
+		}
+	}
+	return hasEmail, hasUsername, tableExists, rows.Err()
 }
 
 func applyPatches(l logging.Logger, client *ent.Client, ctx context.Context, requiredDbVersion string) error {

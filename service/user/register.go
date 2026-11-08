@@ -2,7 +2,6 @@ package user
 
 import (
 	"errors"
-	"strings"
 
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
@@ -25,6 +24,7 @@ type UserRegisterService struct {
 
 // Register creates an active user. Email activation is disabled; accounts are usable immediately.
 func (service *UserRegisterService) Register(c *gin.Context) serializer.Response {
+	service.UserName = util.NormalizeUsername(service.UserName)
 	if err := util.ValidateUsername(service.UserName); err != nil {
 		return serializer.ParamErr(c, err.Error(), err)
 	}
@@ -33,7 +33,7 @@ func (service *UserRegisterService) Register(c *gin.Context) serializer.Response
 	settings := dep.SettingProvider()
 
 	args := &inventory.NewUserArgs{
-		Username:      strings.ToLower(service.UserName),
+		Username:      service.UserName,
 		PlainPassword: service.Password,
 		Status:        user.StatusActive,
 		GroupID:       settings.DefaultGroup(c),

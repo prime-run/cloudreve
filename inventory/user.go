@@ -454,11 +454,12 @@ func (c *userClient) SetStatus(ctx context.Context, u *ent.User, status user.Sta
 }
 
 func (c *userClient) Create(ctx context.Context, args *NewUserArgs) (*ent.User, error) {
+	args.Username = util.NormalizeUsername(args.Username)
 	if err := util.ValidateUsername(args.Username); err != nil {
 		return nil, err
 	}
 
-	// Try to check if there's user with same username.
+	// Try to check if there's user with same username (case-insensitive).
 	if existedUser, err := c.GetByUsername(ctx, args.Username); err == nil {
 		if existedUser.Status == user.StatusInactive {
 			return existedUser, ErrInactiveUserExisted
@@ -509,7 +510,22 @@ func (c *userClient) Create(ctx context.Context, args *NewUserArgs) (*ent.User, 
 }
 
 func (c *userClient) GetByUsername(ctx context.Context, username string) (*ent.User, error) {
-	return withUserEagerLoading(ctx, c.client.User.Query().Where(user.UsernameEqualFold(username))).First(ctx)
+	return withUserEagerLoading(ctx, c.client.User.Query().Where(user.UsernameEqualFold(util.NormalizeUsername(username)))).First(ctx)
+}
+
+// assertUsernameAvailable rejects a case-insensitive username collision with another user.
+func (c *userClient) assertUsernameAvailable(ctx context.Context, username string, excludeID int) error {
+	existing, err := c.GetByUsername(ctx, username)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if existing.ID == excludeID {
+		return nil
+	}
+	return ErrUserUsernameExisted
 }
 
 func (c *userClient) GetByID(ctx context.Context, id int) (*ent.User, error) {
@@ -530,7 +546,7 @@ func (c *userClient) GetActiveByDavAccount(ctx context.Context, username, pwd st
 	return withUserEagerLoading(
 		ctx,
 		c.client.User.Query().
-			Where(user.UsernameEqualFold(username)).
+			Where(user.UsernameEqualFold(util.NormalizeUsername(username))).
 			Where(user.StatusEQ(user.StatusActive)).
 			WithDavAccounts(func(q *ent.DavAccountQuery) {
 				q.Where(davaccount.Password(pwd))
@@ -644,6 +660,14 @@ func (c *userClient) ListUsers(ctx context.Context, args *ListUserParameters) (*
 }
 
 func (c *userClient) Upsert(ctx context.Context, u *ent.User, password, twoFa string) (*ent.User, error) {
+	u.Username = util.NormalizeUsername(u.Username)
+	if err := util.ValidateUsername(u.Username); err != nil {
+		return nil, err
+	}
+	if err := c.assertUsernameAvailable(ctx, u.Username, u.ID); err != nil {
+		return nil, err
+	}
+
 	if u.ID == 0 {
 		q := c.client.User.Create().
 			SetUsername(u.Username).
