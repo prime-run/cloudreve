@@ -13,6 +13,7 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/ent/group"
 	"github.com/cloudreve/Cloudreve/v4/ent/node"
 	"github.com/cloudreve/Cloudreve/v4/ent/oauthclient"
+	"github.com/cloudreve/Cloudreve/v4/ent/schema"
 	"github.com/cloudreve/Cloudreve/v4/ent/setting"
 	"github.com/cloudreve/Cloudreve/v4/ent/storagepolicy"
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
@@ -47,10 +48,6 @@ func migrate(l logging.Logger, client *ent.Client, ctx context.Context, kv cache
 	// new key as "1", which would discard an operator's prior "0".
 	if err := migrateExposeUsernameSetting(l, client, ctx); err != nil {
 		return fmt.Errorf("failed migrating expose_user_username setting: %w", err)
-	}
-
-	if err := normalizeUsernamesAndActivate(l, client, ctx); err != nil {
-		return fmt.Errorf("failed normalizing usernames: %w", err)
 	}
 
 	migrateDefaultSettings(l, client, ctx, kv)
@@ -627,6 +624,13 @@ var patches = []Patch{
 			return nil
 		},
 	},
+	{
+		// One-shot for the email→username identity cutover only. Must not re-run
+		// on later version bumps (that would re-activate admin-disabled accounts).
+		Name:       "normalize_usernames_and_activate_inactive",
+		EndVersion: "4.16.0",
+		Func:       normalizeUsernamesAndActivate,
+	},
 }
 
 // migrateExposeUsernameSetting copies expose_user_email into expose_user_username
@@ -663,9 +667,11 @@ func migrateExposeUsernameSetting(l logging.Logger, client *ent.Client, ctx cont
 	return nil
 }
 
-// normalizeUsernamesAndActivate lowercases usernames for case-insensitive uniqueness
-// and activates accounts left inactive by the removed email-activation flow.
+// normalizeUsernamesAndActivate lowercases usernames (including soft-deleted rows)
+// for case-insensitive uniqueness, and activates accounts left inactive by the
+// removed email-activation flow. Invoked once via the 4.16.0 patch only.
 func normalizeUsernamesAndActivate(l logging.Logger, client *ent.Client, ctx context.Context) error {
+	ctx = schema.SkipSoftDelete(ctx)
 	users, err := client.User.Query().All(ctx)
 	if err != nil {
 		return err
@@ -698,6 +704,7 @@ func normalizeUsernamesAndActivate(l logging.Logger, client *ent.Client, ctx con
 			return fmt.Errorf("failed to normalize user %d: %w", u.ID, err)
 		}
 	}
+	l.Info("Normalized usernames and activated previously inactive accounts (one-shot 4.16.0).")
 	return nil
 }
 
