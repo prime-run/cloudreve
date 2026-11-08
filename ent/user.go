@@ -26,8 +26,8 @@ type User struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	// DeletedAt holds the value of the "deleted_at" field.
 	DeletedAt *time.Time `json:"deleted_at,omitempty"`
-	// Email holds the value of the "email" field.
-	Email string `json:"email,omitempty"`
+	// Username holds the value of the "username" field.
+	Username string `json:"username,omitempty"`
 	// Nick holds the value of the "nick" field.
 	Nick string `json:"nick,omitempty"`
 	// Password holds the value of the "password" field.
@@ -180,7 +180,7 @@ func (*User) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case user.FieldID, user.FieldStorage, user.FieldGroupUsers:
 			values[i] = new(sql.NullInt64)
-		case user.FieldEmail, user.FieldNick, user.FieldPassword, user.FieldStatus, user.FieldTwoFactorSecret, user.FieldAvatar:
+		case user.FieldUsername, user.FieldNick, user.FieldPassword, user.FieldStatus, user.FieldTwoFactorSecret, user.FieldAvatar:
 			values[i] = new(sql.NullString)
 		case user.FieldCreatedAt, user.FieldUpdatedAt, user.FieldDeletedAt:
 			values[i] = new(sql.NullTime)
@@ -224,11 +224,11 @@ func (u *User) assignValues(columns []string, values []any) error {
 				u.DeletedAt = new(time.Time)
 				*u.DeletedAt = value.Time
 			}
-		case user.FieldEmail:
+		case user.FieldUsername:
 			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field email", values[i])
+				return fmt.Errorf("unexpected type %T for field username", values[i])
 			} else if value.Valid {
-				u.Email = value.String
+				u.Username = value.String
 			}
 		case user.FieldNick:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -377,8 +377,8 @@ func (u *User) String() string {
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")
-	builder.WriteString("email=")
-	builder.WriteString(u.Email)
+	builder.WriteString("username=")
+	builder.WriteString(u.Username)
 	builder.WriteString(", ")
 	builder.WriteString("nick=")
 	builder.WriteString(u.Nick)

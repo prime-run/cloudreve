@@ -386,21 +386,8 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 				controllers.FromJSON[usersvc.UserRegisterService](usersvc.RegisterParameterCtx{}),
 				controllers.UserRegister,
 			)
-			// 通过邮件里的链接重设密码
-			user.PATCH("reset/:id",
-				middleware.HashID(hashid.UserID),
-				controllers.FromJSON[usersvc.UserResetService](usersvc.UserResetParameterCtx{}),
-				controllers.UserReset,
-			)
-			// 发送密码重设邮件
-			user.POST("reset",
-				middleware.CaptchaRequired(func(c *gin.Context) bool {
-					return dep.SettingProvider().ForgotPasswordCaptchaEnabled(c)
-				}),
-				controllers.FromJSON[usersvc.UserResetEmailService](usersvc.UserResetEmailParameterCtx{}),
-				controllers.UserSendReset,
-			)
-			// 邮件激活 Done
+			// Forgot-password / email activation removed: identity is username-only.
+			// Admins create and reset accounts. Legacy activate links still work.
 			user.GET("activate/:id",
 				middleware.SignRequired(dep.GeneralAuth()),
 				middleware.HashID(hashid.UserID),

@@ -13,7 +13,7 @@ import (
 func ParamErrorMsg(filed string, tag string) string {
 	// 未通过验证的表单域与中文对应
 	fieldMap := map[string]string{
-		"UserName": "Email",
+		"UserName": "Username",
 		"Password": "Password",
 		"Path":     "Path",
 		"SourceID": "Source resource",

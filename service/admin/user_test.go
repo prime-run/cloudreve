@@ -10,28 +10,29 @@ import (
 	"github.com/gin-gonic/gin/binding"
 )
 
-func TestUpsertUserServiceValidateEmail(t *testing.T) {
+func TestUpsertUserServiceValidateUsername(t *testing.T) {
 	tests := []struct {
-		name    string
-		email   string
-		wantErr bool
+		name     string
+		username string
+		wantErr  bool
 	}{
-		{name: "empty", email: "", wantErr: true},
-		{name: "missing top level domain", email: "admin@test", wantErr: true},
-		{name: "localhost domain", email: "user@localhost", wantErr: true},
-		{name: "surrounding whitespace", email: " user@example.com ", wantErr: true},
-		{name: "regular address", email: "admin@test.com"},
-		{name: "subaddress", email: "user+tag@example.co.uk"},
-		{name: "internationalized address", email: "用户@例子.公司"},
+		{name: "empty", username: "", wantErr: true},
+		{name: "too short", username: "abcd", wantErr: true},
+		{name: "email-like", username: "admin@test.com", wantErr: true},
+		{name: "spaces", username: "user name", wantErr: true},
+		{name: "minimum length", username: "admin"},
+		{name: "with underscore", username: "user_name"},
+		{name: "with hyphen", username: "user-name"},
+		{name: "alphanumeric", username: "user123"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service := &UpsertUserService{User: &ent.User{Email: test.email}}
-			err := service.validateEmail()
+			service := &UpsertUserService{User: &ent.User{Username: test.username}}
+			err := service.validateUsername()
 			if test.wantErr {
 				if err == nil {
-					t.Fatal("expected email validation to fail")
+					t.Fatal("expected username validation to fail")
 				}
 				var appErr serializer.AppError
 				if !errors.As(err, &appErr) {
@@ -43,15 +44,15 @@ func TestUpsertUserServiceValidateEmail(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("expected email validation to pass: %v", err)
+				t.Fatalf("expected username validation to pass: %v", err)
 			}
 		})
 	}
 }
 
-func TestUpsertUserServiceValidateEmailRejectsMissingUser(t *testing.T) {
+func TestUpsertUserServiceValidateUsernameRejectsMissingUser(t *testing.T) {
 	service := &UpsertUserService{}
-	err := service.validateEmail()
+	err := service.validateUsername()
 	if err == nil {
 		t.Fatal("expected missing user validation to fail")
 	}
@@ -78,7 +79,7 @@ func TestUpsertUserServicePasswordBinding(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			service := &UpsertUserService{
-				User:     &ent.User{Email: "admin@example.com"},
+				User:     &ent.User{Username: "admin"},
 				Password: test.password,
 			}
 			err := binding.Validator.ValidateStruct(service)

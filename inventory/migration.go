@@ -32,6 +32,11 @@ func needMigration(client *ent.Client, ctx context.Context, requiredDbVersion st
 
 func migrate(l logging.Logger, client *ent.Client, ctx context.Context, kv cache.Driver, requiredDbVersion string) error {
 	l.Info("Start initializing database schema...")
+	// Rename users.email → users.username before Schema.Create so Ent does not
+	// try to add a second unique column on existing installs.
+	if err := renameUserEmailColumn(l, client, ctx); err != nil {
+		return fmt.Errorf("failed renaming users.email to username: %w", err)
+	}
 	l.Info("Creating basic table schema...")
 	if err := client.Schema.Create(ctx); err != nil {
 		return fmt.Errorf("Failed creating schema resources: %w", err)
@@ -611,6 +616,55 @@ var patches = []Patch{
 			return nil
 		},
 	},
+	{
+		Name:       "rename_expose_user_email_setting",
+		EndVersion: "4.16.0",
+		Func: func(l logging.Logger, client *ent.Client, ctx context.Context) error {
+			old, err := client.Setting.Query().Where(setting.Name("expose_user_email")).First(ctx)
+			if err != nil {
+				if ent.IsNotFound(err) {
+					return nil
+				}
+				return fmt.Errorf("failed to query expose_user_email: %w", err)
+			}
+			_, err = client.Setting.Query().Where(setting.Name("expose_user_username")).First(ctx)
+			if err == nil {
+				_, _ = client.Setting.Delete().Where(setting.Name("expose_user_email")).Exec(ctx)
+				return nil
+			}
+			if !ent.IsNotFound(err) {
+				return err
+			}
+			if err := client.Setting.Create().SetName("expose_user_username").SetValue(old.Value).Exec(ctx); err != nil {
+				return fmt.Errorf("failed to create expose_user_username: %w", err)
+			}
+			_, _ = client.Setting.Delete().Where(setting.Name("expose_user_email")).Exec(ctx)
+			return nil
+		},
+	},
+}
+
+// renameUserEmailColumn renames users.email to users.username when the old column
+// still exists. Safe no-op on fresh installs and already-migrated DBs.
+func renameUserEmailColumn(l logging.Logger, client *ent.Client, ctx context.Context) error {
+	_, err := client.ExecContext(ctx, `ALTER TABLE users RENAME COLUMN email TO username`)
+	if err == nil {
+		l.Info("Renamed users.email column to username.")
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	// Column already renamed, table missing (fresh install), or dialect quirks.
+	if strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no such column") ||
+		strings.Contains(msg, "unknown column") ||
+		strings.Contains(msg, "can't find") ||
+		strings.Contains(msg, "cannot find") ||
+		strings.Contains(msg, "duplicate column") ||
+		strings.Contains(msg, "already exists") {
+		l.Debug("Skip renaming users.email: %s", err)
+		return nil
+	}
+	return err
 }
 
 func applyPatches(l logging.Logger, client *ent.Client, ctx context.Context, requiredDbVersion string) error {

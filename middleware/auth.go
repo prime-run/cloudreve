@@ -122,8 +122,8 @@ func WebDAVAuth() gin.HandlerFunc {
 		userClient := dep.UserClient()
 		expectedUser, err := userClient.GetActiveByDavAccount(c, username, password)
 		if err != nil {
-			if username == "" {
-				if u, err := userClient.GetByEmail(c, username); err == nil {
+			if username != "" {
+				if u, err := userClient.GetByUsername(c, username); err == nil {
 					// Try login with known user but incorrect password, record audit log
 					SetUserCtxByUser(c, u)
 				}
@@ -155,7 +155,7 @@ func WebDAVAuth() gin.HandlerFunc {
 
 		if !group.Permissions.Enabled(int(types.GroupPermissionWebDAV)) {
 			c.Status(http.StatusForbidden)
-			l.Debug("WebDAVAuth: user %q does not have WebDAV permission.", expectedUser.Email)
+			l.Debug("WebDAVAuth: user %q does not have WebDAV permission.", expectedUser.Username)
 			c.Abort()
 			return
 		}

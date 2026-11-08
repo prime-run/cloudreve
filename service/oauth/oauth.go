@@ -312,12 +312,11 @@ func (s *UserInfoService) GetUserInfo(c *gin.Context) (*UserInfoResponse, error)
 		case types.ScopeProfile:
 			siteUrl := dep.SettingProvider().SiteURL(c)
 			resp.Name = u.Nick
-			resp.PreferredUsername = u.Nick
+			resp.PreferredUsername = u.Username
 			resp.Picture = routes.MasterUserAvatarUrl(siteUrl, hashid.EncodeUserID(hashIDEncoder, u.ID)).String()
 			resp.UpdatedAt = u.UpdatedAt.Unix()
 		case types.ScopeEmail:
-			resp.Email = u.Email
-			resp.EmailVerified = true // Users in Cloudreve have verified emails
+			// Identity is username-only; do not invent an email claim.
 		}
 	}
 

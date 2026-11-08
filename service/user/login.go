@@ -9,9 +9,6 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/ent/user"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
 	"github.com/cloudreve/Cloudreve/v4/pkg/auth"
-	"github.com/cloudreve/Cloudreve/v4/pkg/cluster/routes"
-	"github.com/cloudreve/Cloudreve/v4/pkg/email"
-	"github.com/cloudreve/Cloudreve/v4/pkg/hashid"
 	"github.com/cloudreve/Cloudreve/v4/pkg/serializer"
 	"github.com/cloudreve/Cloudreve/v4/pkg/util"
 	"github.com/gin-gonic/gin"
@@ -24,115 +21,27 @@ type LoginParameterCtx struct{}
 
 // UserLoginService 管理用户登录的服务
 type UserLoginService struct {
-	UserName string `form:"email" json:"email" binding:"required,email"`
+	UserName string `form:"username" json:"username" binding:"required,min=5,max=100"`
 	Password string `form:"password" json:"password" binding:"required,min=4,max=128"`
-}
-
-type (
-	// UserResetService 密码重设服务
-	UserResetService struct {
-		Password string `form:"password" json:"password" binding:"required,min=6,max=128"`
-		Secret   string `json:"secret" binding:"required"`
-	}
-	UserResetParameterCtx struct{}
-)
-
-// Reset 重设密码
-func (service *UserResetService) Reset(c *gin.Context) (*User, error) {
-	dep := dependency.FromContext(c)
-	userClient := dep.UserClient()
-	kv := dep.KV()
-	uid := hashid.FromContext(c)
-
-	resetSession, ok := kv.Get(fmt.Sprintf("user_reset_%d", uid))
-	if !ok || resetSession.(string) != service.Secret {
-		return nil, serializer.NewError(serializer.CodeTempLinkExpired, "Link is expired", nil)
-	}
-
-	if err := kv.Delete(fmt.Sprintf("user_reset_%d", uid)); err != nil {
-		return nil, serializer.NewError(serializer.CodeInternalSetting, "Failed to delete reset session", err)
-	}
-
-	u, err := userClient.GetActiveByID(c, uid)
-	if err != nil {
-		return nil, serializer.NewError(serializer.CodeUserNotFound, "User not found", err)
-	}
-
-	u, err = userClient.UpdatePassword(c, u, service.Password)
-	if err != nil {
-		return nil, serializer.NewError(serializer.CodeInternalSetting, "Failed to update password", err)
-	}
-
-	userRes := BuildUser(u, dep.HashIDEncoder())
-	return &userRes, nil
-}
-
-type (
-	// UserResetEmailService 发送密码重设邮件服务
-	UserResetEmailService struct {
-		UserName string `form:"email" json:"email" binding:"required,email"`
-		Language string `form:"language" json:"language"`
-	}
-	UserResetEmailParameterCtx struct{}
-)
-
-const userResetPrefix = "user_reset_"
-
-// Reset 发送密码重设邮件
-func (service *UserResetEmailService) Reset(c *gin.Context) error {
-	dep := dependency.FromContext(c)
-	userClient := dep.UserClient()
-
-	u, err := userClient.GetByEmail(c, service.UserName)
-	if err != nil {
-		return serializer.NewError(serializer.CodeUserNotFound, "User not found", err)
-	}
-
-	if u.Status == user.StatusManualBanned || u.Status == user.StatusSysBanned {
-		return serializer.NewError(serializer.CodeUserBaned, "This user is banned", nil)
-	}
-
-	if u.Status == user.StatusInactive {
-		return serializer.NewError(serializer.CodeUserNotActivated, "This user is not activated", nil)
-	}
-
-	secret := util.RandStringRunesCrypto(32)
-	if err := dep.KV().Set(fmt.Sprintf("%s%d", userResetPrefix, u.ID), secret, 3600); err != nil {
-		return serializer.NewError(serializer.CodeInternalSetting, "Failed to create reset session", err)
-	}
-
-	base := dep.SettingProvider().SiteURL(c)
-	resetUrl := routes.MasterUserResetUrl(base)
-	queries := resetUrl.Query()
-	queries.Add("id", hashid.EncodeUserID(dep.HashIDEncoder(), u.ID))
-	queries.Add("secret", secret)
-	resetUrl.RawQuery = queries.Encode()
-
-	title, body, err := email.NewResetEmail(c, dep.SettingProvider(), u, resetUrl.String())
-	if err != nil {
-		return serializer.NewError(serializer.CodeFailedSendEmail, "Failed to send activation email", err)
-	}
-
-	if err := dep.EmailClient(c).Send(c, u.Email, title, body); err != nil {
-		return serializer.NewError(serializer.CodeFailedSendEmail, "Failed to send activation email", err)
-	}
-
-	return nil
 }
 
 // Login 用户登录函数
 func (service *UserLoginService) Login(c *gin.Context) (*ent.User, string, error) {
+	if err := util.ValidateUsername(service.UserName); err != nil {
+		return nil, "", serializer.NewError(serializer.CodeParamErr, err.Error(), err)
+	}
+
 	dep := dependency.FromContext(c)
 	userClient := dep.UserClient()
 
 	ctx := context.WithValue(c, inventory.LoadUserGroup{}, true)
-	expectedUser, err := userClient.GetByEmail(ctx, service.UserName)
+	expectedUser, err := userClient.GetByUsername(ctx, service.UserName)
 
 	// 一系列校验
 	if err != nil {
-		err = serializer.NewError(serializer.CodeInvalidPassword, "Incorrect password or email address", err)
+		err = serializer.NewError(serializer.CodeInvalidPassword, "Incorrect password or username", err)
 	} else if checkErr := inventory.CheckPassword(expectedUser, service.Password); checkErr != nil {
-		err = serializer.NewError(serializer.CodeInvalidPassword, "Incorrect password or email address", err)
+		err = serializer.NewError(serializer.CodeInvalidPassword, "Incorrect password or username", err)
 	} else if expectedUser.Status == user.StatusManualBanned || expectedUser.Status == user.StatusSysBanned {
 		err = serializer.NewError(serializer.CodeUserBaned, "This account has been blocked", nil)
 	} else if expectedUser.Status == user.StatusInactive {
@@ -215,7 +124,7 @@ type (
 	}
 )
 
-// Login 用户登录函数
+// Verify2FA validates OTP for a pending 2FA login session.
 func (service *OtpValidationService) Verify2FA(c *gin.Context) (*ent.User, error) {
 	dep := dependency.FromContext(c)
 	kv := dep.KV()
@@ -246,14 +155,18 @@ func (service *OtpValidationService) Verify2FA(c *gin.Context) (*ent.User, error
 type (
 	PrepareLoginParameterCtx struct{}
 	PrepareLoginService      struct {
-		Email string `form:"email" binding:"required,email"`
+		Username string `form:"username" binding:"required,min=5,max=100"`
 	}
 )
 
 func (service *PrepareLoginService) Prepare(c *gin.Context) (*PrepareLoginResponse, error) {
+	if err := util.ValidateUsername(service.Username); err != nil {
+		return nil, serializer.NewError(serializer.CodeParamErr, err.Error(), err)
+	}
+
 	dep := dependency.FromContext(c)
 	ctx := context.WithValue(c, inventory.LoadUserPasskey{}, true)
-	expectedUser, err := dep.UserClient().GetByEmail(ctx, service.Email)
+	expectedUser, err := dep.UserClient().GetByUsername(ctx, service.Username)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeNotFound, "User not found", err)
 	}

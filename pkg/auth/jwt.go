@@ -293,7 +293,7 @@ func (t *tokenAuth) Issue(ctx context.Context, args *IssueTokenArgs) (*Token, er
 // hashUserState returns a hash string for user state for critical fields, it is used
 // to detect refresh token revocation after user changed password.
 func (t *tokenAuth) hashUserState(ctx context.Context, u *ent.User) [32]byte {
-	return sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s", u.Email, u.Password, t.s.SiteBasic(ctx).ID)))
+	return sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s", u.Username, u.Password, t.s.SiteBasic(ctx).ID)))
 }
 
 // ValidateScopes checks if all requested scopes are a subset of the allowed scopes.

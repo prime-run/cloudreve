@@ -13,8 +13,8 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/manager"
 	"github.com/cloudreve/Cloudreve/v4/pkg/hashid"
 	"github.com/cloudreve/Cloudreve/v4/pkg/serializer"
+	"github.com/cloudreve/Cloudreve/v4/pkg/util"
 	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/binding"
 	"github.com/samber/lo"
 )
 
@@ -38,7 +38,7 @@ const (
 	userStatusCondition = "user_status"
 	userGroupCondition  = "user_group"
 	userNickCondition   = "user_nick"
-	userEmailCondition  = "user_email"
+	userUsernameCondition = "user_username"
 )
 
 func (service *AdminListService) Users(c *gin.Context) (*ListUserResponse, error) {
@@ -69,8 +69,8 @@ func (service *AdminListService) Users(c *gin.Context) (*ListUserResponse, error
 		},
 		Status:  user.Status(service.Conditions[userStatusCondition]),
 		GroupID: groupID,
-		Nick:    service.Conditions[userNickCondition],
-		Email:   service.Conditions[userEmailCondition],
+		Nick:     service.Conditions[userNickCondition],
+		Username: service.Conditions[userUsernameCondition],
 	})
 
 	if err != nil {
@@ -172,22 +172,18 @@ type (
 	UpsertUserParamCtx struct{}
 )
 
-type adminUserEmailValidation struct {
-	Email string `binding:"required,email"`
-}
-
-func (s *UpsertUserService) validateEmail() error {
+func (s *UpsertUserService) validateUsername() error {
 	if s.User == nil {
-		return serializer.NewError(serializer.CodeParamErr, "Email format error", nil)
+		return serializer.NewError(serializer.CodeParamErr, "Username is required", nil)
 	}
-	if err := binding.Validator.ValidateStruct(adminUserEmailValidation{Email: s.User.Email}); err != nil {
-		return serializer.NewError(serializer.CodeParamErr, "Email format error", err)
+	if err := util.ValidateUsername(s.User.Username); err != nil {
+		return serializer.NewError(serializer.CodeParamErr, err.Error(), err)
 	}
 	return nil
 }
 
 func (s *UpsertUserService) Update(c *gin.Context) (*GetUserResponse, error) {
-	if err := s.validateEmail(); err != nil {
+	if err := s.validateUsername(); err != nil {
 		return nil, err
 	}
 
@@ -265,7 +261,7 @@ func (s *UpsertUserService) Update(c *gin.Context) (*GetUserResponse, error) {
 }
 
 func (s *UpsertUserService) Create(c *gin.Context) (*GetUserResponse, error) {
-	if err := s.validateEmail(); err != nil {
+	if err := s.validateUsername(); err != nil {
 		return nil, err
 	}
 

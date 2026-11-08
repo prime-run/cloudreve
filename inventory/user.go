@@ -38,8 +38,10 @@ type (
 )
 
 var (
-	ErrUserEmailExisted      = errors.New("user email has been registered")
-	ErrInactiveUserExisted   = errors.New("email already registered but not activated")
+	ErrUserUsernameExisted = errors.New("username has been registered")
+	// ErrUserEmailExisted is kept as an alias for older call sites during the rename.
+	ErrUserEmailExisted      = ErrUserUsernameExisted
+	ErrInactiveUserExisted   = errors.New("username already registered but not activated")
 	ErrorUnknownPasswordType = errors.New("unknown password type")
 	ErrorIncorrectPassword   = errors.New("incorrect password")
 	ErrInsufficientPoints    = errors.New("insufficient points")
@@ -52,10 +54,10 @@ var (
 type (
 	UserClient interface {
 		TxOperator
-		// New creates a new user. If user email registered, existed User will be returned.
+		// Create creates a new user. If username is taken, the existing User is returned.
 		Create(ctx context.Context, args *NewUserArgs) (*ent.User, error)
-		// GetByEmail get the user with given email, user status is ignored.
-		GetByEmail(ctx context.Context, email string) (*ent.User, error)
+		// GetByUsername get the user with given username, user status is ignored.
+		GetByUsername(ctx context.Context, username string) (*ent.User, error)
 		// GetByID get user by its ID, user status is ignored.
 		GetByID(ctx context.Context, id int) (*ent.User, error)
 		// GetActiveByID get user by its ID, only active user will be returned.
@@ -66,11 +68,11 @@ type (
 		AnonymousUser(ctx context.Context) (*ent.User, error)
 		// GetLoginUserByID returns the login user by its ID. It emits some errors and fallback to anonymous user.
 		GetLoginUserByID(ctx context.Context, uid int) (*ent.User, error)
-		// GetLoginUserByEmail returns the login user by its WebDAV credentials.
-		GetActiveByDavAccount(ctx context.Context, email, pwd string) (*ent.User, error)
+		// GetActiveByDavAccount returns the login user by its WebDAV credentials (username + DAV password).
+		GetActiveByDavAccount(ctx context.Context, username, pwd string) (*ent.User, error)
 		// SaveSettings saves user settings.
 		SaveSettings(ctx context.Context, u *ent.User) error
-		// SearchActive search active users by Email or nickname.
+		// SearchActive search active users by username or nickname.
 		SearchActive(ctx context.Context, limit int, keyword string) ([]*ent.User, error)
 		// ApplyStorageDiff apply storage diff to user.
 		ApplyStorageDiff(ctx context.Context, diffs StorageDiff) error
@@ -112,10 +114,10 @@ type (
 	}
 	ListUserParameters struct {
 		*PaginationArgs
-		GroupID int
-		Status  user.Status
-		Nick    string
-		Email   string
+		GroupID  int
+		Status   user.Status
+		Nick     string
+		Username string
 	}
 	ListUserResult struct {
 		*PaginationResults
@@ -134,7 +136,7 @@ type userClient struct {
 type (
 	// NewUserArgs args to create a new user
 	NewUserArgs struct {
-		Email         string
+		Username      string
 		Nick          string // Optional
 		PlainPassword string
 		Status        user.Status
@@ -452,22 +454,26 @@ func (c *userClient) SetStatus(ctx context.Context, u *ent.User, status user.Sta
 }
 
 func (c *userClient) Create(ctx context.Context, args *NewUserArgs) (*ent.User, error) {
-	// Try to check if there's user with same email.
-	if existedUser, err := c.GetByEmail(ctx, args.Email); err == nil {
+	if err := util.ValidateUsername(args.Username); err != nil {
+		return nil, err
+	}
+
+	// Try to check if there's user with same username.
+	if existedUser, err := c.GetByUsername(ctx, args.Username); err == nil {
 		if existedUser.Status == user.StatusInactive {
 			return existedUser, ErrInactiveUserExisted
 		}
-		return existedUser, ErrUserEmailExisted
+		return existedUser, ErrUserUsernameExisted
 	}
 
 	nick := args.Nick
 	if nick == "" {
-		nick = strings.Split(args.Email, "@")[0]
+		nick = args.Username
 	}
 
 	userSetting := &types.UserSetting{VersionRetention: true, VersionRetentionMax: 10}
 	query := c.client.User.Create().
-		SetEmail(args.Email).
+		SetUsername(args.Username).
 		SetNick(nick).
 		SetStatus(args.Status).
 		SetGroupID(args.GroupID).
@@ -502,8 +508,8 @@ func (c *userClient) Create(ctx context.Context, args *NewUserArgs) (*ent.User, 
 	return newUser, nil
 }
 
-func (c *userClient) GetByEmail(ctx context.Context, email string) (*ent.User, error) {
-	return withUserEagerLoading(ctx, c.client.User.Query().Where(user.EmailEqualFold(email))).First(ctx)
+func (c *userClient) GetByUsername(ctx context.Context, username string) (*ent.User, error) {
+	return withUserEagerLoading(ctx, c.client.User.Query().Where(user.UsernameEqualFold(username))).First(ctx)
 }
 
 func (c *userClient) GetByID(ctx context.Context, id int) (*ent.User, error) {
@@ -519,12 +525,12 @@ func (c *userClient) GetActiveByID(ctx context.Context, id int) (*ent.User, erro
 	).First(ctx)
 }
 
-func (c *userClient) GetActiveByDavAccount(ctx context.Context, email, pwd string) (*ent.User, error) {
+func (c *userClient) GetActiveByDavAccount(ctx context.Context, username, pwd string) (*ent.User, error) {
 	ctx = context.WithValue(ctx, LoadUserGroup{}, true)
 	return withUserEagerLoading(
 		ctx,
 		c.client.User.Query().
-			Where(user.EmailEqualFold(email)).
+			Where(user.UsernameEqualFold(username)).
 			Where(user.StatusEQ(user.StatusActive)).
 			WithDavAccounts(func(q *ent.DavAccountQuery) {
 				q.Where(davaccount.Password(pwd))
@@ -556,7 +562,7 @@ func (c *userClient) SearchActive(ctx context.Context, limit int, keyword string
 	return withUserEagerLoading(
 		ctx,
 		c.client.User.Query().
-			Where(user.Or(user.EmailContainsFold(keyword), user.NickContainsFold(keyword))).
+			Where(user.Or(user.UsernameContainsFold(keyword), user.NickContainsFold(keyword))).
 			Where(user.StatusEQ(user.StatusActive)).
 			Limit(limit),
 	).All(ctx)
@@ -611,8 +617,8 @@ func (c *userClient) ListUsers(ctx context.Context, args *ListUserParameters) (*
 	if args.Nick != "" {
 		query = query.Where(user.NickContainsFold(args.Nick))
 	}
-	if args.Email != "" {
-		query = query.Where(user.EmailContainsFold(args.Email))
+	if args.Username != "" {
+		query = query.Where(user.UsernameContainsFold(args.Username))
 	}
 	query.Order(getUserOrderOption(args)...)
 
@@ -640,7 +646,7 @@ func (c *userClient) ListUsers(ctx context.Context, args *ListUserParameters) (*
 func (c *userClient) Upsert(ctx context.Context, u *ent.User, password, twoFa string) (*ent.User, error) {
 	if u.ID == 0 {
 		q := c.client.User.Create().
-			SetEmail(u.Email).
+			SetUsername(u.Username).
 			SetNick(u.Nick).
 			SetAvatar(u.Avatar).
 			SetStatus(u.Status).
@@ -660,7 +666,7 @@ func (c *userClient) Upsert(ctx context.Context, u *ent.User, password, twoFa st
 	}
 
 	q := c.client.User.UpdateOne(u).
-		SetEmail(u.Email).
+		SetUsername(u.Username).
 		SetNick(u.Nick).
 		SetAvatar(u.Avatar).
 		SetStatus(u.Status).
@@ -688,8 +694,8 @@ func getUserOrderOption(args *ListUserParameters) []user.OrderOption {
 		return []user.OrderOption{user.ByNick(orderTerm), user.ByID(orderTerm)}
 	case user.FieldStorage:
 		return []user.OrderOption{user.ByStorage(orderTerm), user.ByID(orderTerm)}
-	case user.FieldEmail:
-		return []user.OrderOption{user.ByEmail(orderTerm), user.ByID(orderTerm)}
+	case user.FieldUsername:
+		return []user.OrderOption{user.ByUsername(orderTerm), user.ByID(orderTerm)}
 	case user.FieldUpdatedAt:
 		return []user.OrderOption{user.ByUpdatedAt(orderTerm), user.ByID(orderTerm)}
 	default:

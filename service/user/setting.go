@@ -37,7 +37,7 @@ func Init2FA(c *gin.Context) (string, error) {
 
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      "Cloudreve",
-		AccountName: user.Email,
+		AccountName: user.Username,
 	})
 	if err != nil {
 		return "", serializer.NewError(serializer.CodeInternalSetting, "Failed to generate TOTP secret", err)
@@ -88,14 +88,13 @@ func (service *GetAvatarService) Get(c *gin.Context) error {
 
 	avatarSettings := settings.Avatar(c)
 
-	// Gravatar 头像重定向
+	// Gravatar redirect keyed by username (no mailbox identity).
 	if user.Avatar == GravatarAvatar {
 		gravatarRoot, err := url.Parse(avatarSettings.Gravatar)
 		if err != nil {
 			return serializer.NewError(serializer.CodeInternalSetting, "Failed to parse Gravatar server", err)
 		}
-		email_lowered := strings.ToLower(user.Email)
-		has := md5.Sum([]byte(email_lowered))
+		has := md5.Sum([]byte(strings.ToLower(user.Username)))
 		avatar, _ := url.Parse(fmt.Sprintf("/avatar/%x?d=mm&s=200", has))
 
 		c.Redirect(http.StatusFound, gravatarRoot.ResolveReference(avatar).String())
