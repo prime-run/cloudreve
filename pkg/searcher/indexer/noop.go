@@ -9,7 +9,7 @@ import (
 // NoopIndexer is a no-op implementation of SearchIndexer, used when FTS is disabled.
 type NoopIndexer struct{}
 
-func (n *NoopIndexer) IndexFile(ctx context.Context, ownerID, fileID, entityID int, fileName, text string) error {
+func (n *NoopIndexer) IndexFile(ctx context.Context, ownerID, fileID, entityID, teamID int, fileName, text string) error {
 	return nil
 }
 
@@ -21,7 +21,11 @@ func (n *NoopIndexer) ChangeOwner(ctx context.Context, fileID, oldOwnerID, newOw
 	return nil
 }
 
-func (n *NoopIndexer) CopyByFileID(ctx context.Context, srcFileID, dstFileID, dstOwnerID, dstEntityID int) error {
+func (n *NoopIndexer) ChangeTeamID(ctx context.Context, fileID, teamID int) error {
+	return nil
+}
+
+func (n *NoopIndexer) CopyByFileID(ctx context.Context, srcFileID, dstFileID, dstOwnerID, dstEntityID, dstTeamID int) error {
 	return nil
 }
 
@@ -29,7 +33,7 @@ func (n *NoopIndexer) Rename(ctx context.Context, fileID, entityID int, newFileN
 	return nil
 }
 
-func (n *NoopIndexer) Search(ctx context.Context, ownerID int, query string, offset int) ([]searcher.SearchResult, int64, error) {
+func (n *NoopIndexer) Search(ctx context.Context, ownerID, teamID int, query string, offset int) ([]searcher.SearchResult, int64, error) {
 	return nil, 0, nil
 }
 

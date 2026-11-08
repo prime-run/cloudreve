@@ -819,6 +819,7 @@ type (
 	IndexDiff struct {
 		IndexToCopy        []IndexDiffCopyDetails
 		IndexToChangeOwner []IndexDiffOwnerChangeDetails
+		IndexToChangeTeam  []IndexDiffTeamChangeDetails
 		IndexToRename      []IndexDiffRenameDetails
 		IndexToDelete      []int
 		IndexToUpdate      []IndexDiffUpdateDetails
@@ -843,6 +844,11 @@ type (
 		OriginalOwnerID int
 		NewOwnerID      int
 	}
+	// IndexDiffTeamChangeDetails updates team_id on existing FTS docs after a cross-workspace move.
+	IndexDiffTeamChangeDetails struct {
+		FileID int
+		TeamID int
+	}
 	IndexDiffRenameDetails struct {
 		Uri      URI
 		FileID   int
@@ -856,6 +862,9 @@ func (i *IndexDiff) Merge(d *IndexDiff) {
 	}
 	if i.IndexToChangeOwner == nil {
 		i.IndexToChangeOwner = make([]IndexDiffOwnerChangeDetails, 0)
+	}
+	if i.IndexToChangeTeam == nil {
+		i.IndexToChangeTeam = make([]IndexDiffTeamChangeDetails, 0)
 	}
 	if i.IndexToDelete == nil {
 		i.IndexToDelete = make([]int, 0)
@@ -874,6 +883,9 @@ func (i *IndexDiff) Merge(d *IndexDiff) {
 	}
 	if len(d.IndexToChangeOwner) > 0 {
 		i.IndexToChangeOwner = append(i.IndexToChangeOwner, d.IndexToChangeOwner...)
+	}
+	if len(d.IndexToChangeTeam) > 0 {
+		i.IndexToChangeTeam = append(i.IndexToChangeTeam, d.IndexToChangeTeam...)
 	}
 	if len(d.IndexToDelete) > 0 {
 		i.IndexToDelete = append(i.IndexToDelete, d.IndexToDelete...)

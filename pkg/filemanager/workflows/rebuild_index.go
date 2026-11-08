@@ -274,7 +274,12 @@ func (m *RebuildIndexTask) indexSingleFile(
 			text = extracted
 		}
 
-		if err := indexer.IndexFile(ctx, f.OwnerID, f.ID, entityID, f.Name, text); err != nil {
+		teamID, ok := resolveTeamIDForFile(ctx, dep.FileClient(), dep.TeamClient(), f)
+		if !ok {
+			m.l.Warning("Failed to resolve team for file %d under .team, skipping index", f.ID)
+			return nil
+		}
+		if err := indexer.IndexFile(ctx, f.OwnerID, f.ID, entityID, teamID, f.Name, text); err != nil {
 			return fmt.Errorf("failed to index file %d: %w", f.ID, err)
 		}
 
@@ -286,6 +291,36 @@ func (m *RebuildIndexTask) indexSingleFile(
 	}
 
 	return nil
+}
+
+// resolveTeamIDForFile walks parents until a team root (or personal root) is found.
+// ok is false when the file sits under .team but the team record cannot be resolved —
+// callers must skip indexing rather than store the doc as personal (team_id=0).
+func resolveTeamIDForFile(ctx context.Context, fc inventory.FileClient, tc inventory.TeamClient, f *ent.File) (teamID int, ok bool) {
+	cur := f
+	seen := make(map[int]struct{})
+	for cur != nil {
+		if _, ok := seen[cur.ID]; ok {
+			return 0, false
+		}
+		seen[cur.ID] = struct{}{}
+		if cur.FileChildren == 0 {
+			if cur.Name == inventory.TeamRootFolderName {
+				t, err := tc.GetByRootFileID(ctx, cur.ID)
+				if err != nil {
+					return 0, false
+				}
+				return t.ID, true
+			}
+			return 0, true
+		}
+		parent, err := fc.GetByID(ctx, cur.FileChildren)
+		if err != nil {
+			return 0, false
+		}
+		cur = parent
+	}
+	return 0, false
 }
 
 func (m *RebuildIndexTask) Progress(ctx context.Context) queue.Progresses {
