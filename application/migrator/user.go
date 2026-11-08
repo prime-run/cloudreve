@@ -67,7 +67,7 @@ func (m *Migrator) migrateUser() error {
 				SetRawID(int(u.ID)).
 				SetCreatedAt(formatTime(u.CreatedAt)).
 				SetUpdatedAt(formatTime(u.UpdatedAt)).
-				SetEmail(u.Email).
+				SetUsername(u.Email).
 				SetNick(u.Nick).
 				SetStatus(userStatus).
 				SetStorage(int64(u.Storage)).

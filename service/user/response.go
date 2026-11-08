@@ -106,7 +106,7 @@ type BuiltinLoginResponse struct {
 // User 用户序列化器
 type User struct {
 	ID                  string                         `json:"id"`
-	Email               string                         `json:"email,omitempty"`
+	Username            string                         `json:"username,omitempty"`
 	Nickname            string                         `json:"nickname"`
 	Status              user.Status                    `json:"status,omitempty"`
 	Avatar              string                         `json:"avatar,omitempty"`
@@ -163,7 +163,7 @@ func BuildWebAuthnList(credentials []webauthn.Credential) []WebAuthnCredentials 
 func BuildUser(user *ent.User, idEncoder hashid.Encoder) User {
 	return User{
 		ID:                  hashid.EncodeUserID(idEncoder, user.ID),
-		Email:               user.Email,
+		Username:            user.Username,
 		Nickname:            user.Nick,
 		Status:              user.Status,
 		Avatar:              user.Avatar,
@@ -224,8 +224,8 @@ const (
 )
 
 // BuildUserRedacted Serialize a user without sensitive information.
-// The email is only exposed when the requester is a signed-in user (level >=
-// RedactLevelUser) and the `expose_user_email` setting is enabled.
+// The username is only exposed when the requester is a signed-in user (level >=
+// RedactLevelUser) and the `expose_user_username` setting is enabled.
 func BuildUserRedacted(ctx context.Context, u *ent.User, level int, idEncoder hashid.Encoder) User {
 	userRaw := BuildUser(u, idEncoder)
 
@@ -241,8 +241,8 @@ func BuildUserRedacted(ctx context.Context, u *ent.User, level int, idEncoder ha
 		user.Group = RedactedGroup(userRaw.Group)
 	}
 
-	if level == RedactLevelUser && dependency.FromContext(ctx).SettingProvider().ExposeUserEmail(ctx) {
-		user.Email = userRaw.Email
+	if level == RedactLevelUser && dependency.FromContext(ctx).SettingProvider().ExposeUserUsername(ctx) {
+		user.Username = userRaw.Username
 	}
 
 	return user

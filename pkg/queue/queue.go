@@ -198,7 +198,7 @@ func (q *queue) QueueTask(ctx context.Context, t Task) error {
 	}
 	owner := ""
 	if t.Owner() != nil {
-		owner = t.Owner().Email
+		owner = t.Owner().Username
 	}
 	q.logger.Info("New Task with type %q submitted to queue %q by %q", t.Type(), q.name, owner)
 	if q.registry != nil {

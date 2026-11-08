@@ -142,30 +142,7 @@ func UserRegister(c *gin.Context) {
 	c.JSON(200, service.Register(c))
 }
 
-// UserSendReset 发送密码重设邮件
-func UserSendReset(c *gin.Context) {
-	service := ParametersFromContext[*user.UserResetEmailService](c, user.UserResetEmailParameterCtx{})
-	if err := service.Reset(c); err != nil {
-		c.JSON(200, serializer.Err(c, err))
-		c.Abort()
-		return
-	}
-	c.JSON(200, serializer.Response{})
-}
-
-// UserReset 重设密码
-func UserReset(c *gin.Context) {
-	service := ParametersFromContext[*user.UserResetService](c, user.UserResetParameterCtx{})
-	res, err := service.Reset(c)
-	if err != nil {
-		c.JSON(200, serializer.Err(c, err))
-		c.Abort()
-		return
-	}
-	c.JSON(200, serializer.Response{Data: res})
-}
-
-// UserActivate 用户激活
+// UserActivate activates a legacy inactive account.
 func UserActivate(c *gin.Context) {
 	c.JSON(200, user.ActivateUser(c))
 }

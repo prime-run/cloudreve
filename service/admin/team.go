@@ -58,7 +58,7 @@ type TeamMemberResponse struct {
 	ID         int       `json:"id"`
 	UserID     int       `json:"user_id"`
 	UserHashID string    `json:"user_hash_id,omitempty"`
-	Email      string    `json:"email,omitempty"`
+	Username   string    `json:"username,omitempty"`
 	Nick       string    `json:"nick,omitempty"`
 	Role       string    `json:"role"`
 	User       *ent.User `json:"user,omitempty"`
@@ -272,7 +272,7 @@ func mapTeamResponse(t *ent.Team, hasher hashid.Encoder) GetTeamResponse {
 			}
 			if m.Edges.User != nil {
 				mr.User = m.Edges.User
-				mr.Email = m.Edges.User.Email
+				mr.Username = m.Edges.User.Username
 				mr.Nick = m.Edges.User.Nick
 				mr.UserHashID = hashid.EncodeUserID(hasher, m.Edges.User.ID)
 			}

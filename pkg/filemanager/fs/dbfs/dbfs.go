@@ -759,7 +759,7 @@ func (f *DBFS) getFileByPath(ctx context.Context, navigator Navigator, path *fs.
 
 // initFs initializes the file system for the user.
 func (f *DBFS) initFs(ctx context.Context, uid int) error {
-	f.l.Info("Initialize database file system for user %q", f.user.Email)
+	f.l.Info("Initialize database file system for user %q", f.user.Username)
 	_, err := f.fileClient.CreateFolder(ctx, nil,
 		&inventory.CreateFolderParameters{
 			Owner: uid,
