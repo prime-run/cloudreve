@@ -22,6 +22,9 @@ __debug*
 .idea/*
 uploads/*
 temp
+.env
+.env.local
+.env.*.local
 
 # Version control
 version.lock

@@ -1,4 +1,6 @@
 ; Copy to data/conf.ini (or pass with -c). data/ is gitignored.
+; Prefer matching credentials with .env / .env.example so they stay in sync.
+; Any value can be overridden at runtime with CR_CONF_Section__Key env vars.
 [System]
 Debug = true
 Mode = master
