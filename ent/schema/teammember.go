@@ -17,7 +17,7 @@ func (TeamMember) Fields() []ent.Field {
 		field.Int("team_id"),
 		field.Int("user_id"),
 		field.Enum("role").
-			Values("owner", "admin", "member").
+			Values("owner", "admin", "member", "viewer").
 			Default("member"),
 	}
 }

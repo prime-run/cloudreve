@@ -780,7 +780,6 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 		res Navigator
 	)
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if navigator, ok := f.navigators[navigatorId]; ok {
 		res = navigator
 	} else {
@@ -797,6 +796,7 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 		case constants.FileSystemTeam:
 			n = NewTeamNavigator(f.user, f.fileClient, f.teamClient, f.l, config, f.hasher)
 		default:
+			f.mu.Unlock()
 			return nil, fmt.Errorf("unknown file system %q", pathFs)
 		}
 
@@ -817,6 +817,14 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 
 		f.navigators[navigatorId] = n
 		res = n
+	}
+	f.mu.Unlock()
+
+	// Team capabilities depend on membership role; resolve before the capability check.
+	if tn, ok := res.(*teamNavigator); ok {
+		if _, err := tn.ensureMembership(ctx, path); err != nil {
+			return nil, err
+		}
 	}
 
 	// Check fs capabilities
