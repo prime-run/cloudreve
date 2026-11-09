@@ -141,10 +141,8 @@ func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
 		n.root.OwnerModel = n.user
 		n.root.IsUserRoot = true
 	}
-	// Keep file-level caps aligned with the latest membership role.
-	if n.root != nil {
-		n.root.CapabilitiesBs = n.Capabilities(false).Capability
-	}
+	// Keep the whole restored/cached tree aligned with the latest membership role.
+	n.refreshCapabilities()
 
 	current, lastAncestor := n.root, n.root
 	elements := path.Elements()
@@ -159,6 +157,26 @@ func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
 	return current, nil
 }
 
+// refreshCapabilities stamps the current role's capability set onto every
+// cached file under root (including context-hint restored non-leaves).
+func (n *teamNavigator) refreshCapabilities() {
+	if n.root == nil {
+		return
+	}
+	caps := n.Capabilities(false).Capability
+	var walk func(*File)
+	walk = func(f *File) {
+		if f == nil {
+			return
+		}
+		f.CapabilitiesBs = caps
+		for _, child := range f.Children {
+			walk(child)
+		}
+	}
+	walk(n.root)
+}
+
 func (n *teamNavigator) Children(ctx context.Context, parent *File, args *ListArgs) (*ListResult, error) {
 	return n.baseNavigator.children(ctx, parent, args)
 }
@@ -168,9 +186,11 @@ func (n *teamNavigator) walkNext(ctx context.Context, root *File, next string, i
 }
 
 func (n *teamNavigator) Capabilities(isSearching bool) *fs.NavigatorProps {
-	caps := teamNavigatorCapability
-	if n.role == teammember.RoleViewer {
-		caps = teamViewerNavigatorCapability
+	// Default to viewer (least privilege). Only known write roles get full caps.
+	caps := teamViewerNavigatorCapability
+	switch n.role {
+	case teammember.RoleOwner, teammember.RoleAdmin, teammember.RoleMember:
+		caps = teamNavigatorCapability
 	}
 	res := &fs.NavigatorProps{
 		Capability:            caps,

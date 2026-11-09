@@ -84,7 +84,8 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 	// Get navigator.
 	requiredCaps := []NavigatorCapability{NavigatorCapabilityUploadFile, NavigatorCapabilityLockFile}
 	if req.Props.EntityType != nil && *req.Props.EntityType == types.EntityTypeThumbnail {
-		requiredCaps = []NavigatorCapability{NavigatorCapabilityGenerateThumb, NavigatorCapabilityLockFile}
+		// Proxy thumb generation must not require LockFile; viewers have GenerateThumb only.
+		requiredCaps = []NavigatorCapability{NavigatorCapabilityGenerateThumb}
 	}
 	navigator, err := f.getNavigator(ctx, req.Props.Uri, requiredCaps...)
 	if err != nil {
@@ -300,8 +301,14 @@ func (f *DBFS) CompleteUpload(ctx context.Context, session *fs.UploadSession) (f
 		return nil, err
 	}
 
+	// Re-check write capabilities so a mid-upload demotion to viewer cannot commit.
+	requiredCaps := []NavigatorCapability{NavigatorCapabilityUploadFile, NavigatorCapabilityLockFile}
+	if session.Props.EntityType != nil && *session.Props.EntityType == types.EntityTypeThumbnail {
+		requiredCaps = []NavigatorCapability{NavigatorCapabilityGenerateThumb}
+	}
+
 	// Get placeholder file
-	file, err := f.Get(ctx, session.Props.Uri, WithFileEntities(), WithNotRoot())
+	file, err := f.Get(ctx, session.Props.Uri, WithFileEntities(), WithNotRoot(), WithRequiredCapabilities(requiredCaps...))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get placeholder file: %w", err)
 	}

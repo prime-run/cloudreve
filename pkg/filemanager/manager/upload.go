@@ -16,6 +16,7 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/pkg/cluster"
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/driver"
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/fs"
+	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/fs/dbfs"
 	"github.com/cloudreve/Cloudreve/v4/pkg/logging"
 	"github.com/cloudreve/Cloudreve/v4/pkg/queue"
 	"github.com/cloudreve/Cloudreve/v4/pkg/serializer"
@@ -184,6 +185,12 @@ func (m *manager) CreateUploadSession(ctx context.Context, req *fs.UploadRequest
 }
 
 func (m *manager) ConfirmUploadSession(ctx context.Context, session *fs.UploadSession, chunkIndex int) (fs.File, error) {
+	// Re-check write capabilities so a mid-upload demotion to viewer cannot continue.
+	if err := m.fs.CheckCapability(ctx, session.Props.Uri,
+		dbfs.WithRequiredCapabilities(dbfs.NavigatorCapabilityUploadFile, dbfs.NavigatorCapabilityLockFile)); err != nil {
+		return nil, err
+	}
+
 	// Get placeholder file
 	file, err := m.fs.Get(ctx, session.Props.Uri)
 	if err != nil {
