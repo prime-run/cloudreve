@@ -1,25 +1,30 @@
 # Local PostgreSQL for Cloudreve development (host runs the Go binary + Vite).
 # Usage (from this directory):
+#   cp -n .env.example .env   # first time
 #   docker compose -f docker-compose.db.yml up -d
 #   docker compose -f docker-compose.db.yml down
 #
+# Credentials come from .env (see .env.example). Defaults match the example.
 # Do not run alongside docker-compose.yml at the same time — both bind host :5432.
-
 services:
   postgres:
-    image: postgres:17
+    image: ${POSTGRES_IMAGE:-postgres:17}
     container_name: cloudreve-postgres
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     environment:
-      POSTGRES_USER: cloudreve
-      POSTGRES_PASSWORD: cloudreve_dev
-      POSTGRES_DB: cloudreve
+      POSTGRES_USER: ${POSTGRES_USER:-cloudreve}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cloudreve_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-cloudreve}
     volumes:
       - cloudreve_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cloudreve -d cloudreve"]
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-cloudreve} -d ${POSTGRES_DB:-cloudreve}",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10

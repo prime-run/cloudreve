@@ -2,11 +2,13 @@ package debug
 
 import (
 	"context"
+	stdsql "database/sql"
+	"fmt"
+	"time"
+
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
-	"fmt"
 	"github.com/google/uuid"
-	"time"
 )
 
 const strMaxLen = 102400
@@ -39,9 +41,9 @@ func (d *DebugDriver) Exec(ctx context.Context, query string, args, v any) error
 }
 
 // ExecContext logs its params and calls the underlying driver ExecContext method if it is supported.
-func (d *DebugDriver) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+func (d *DebugDriver) ExecContext(ctx context.Context, query string, args ...any) (stdsql.Result, error) {
 	drv, ok := d.Driver.(interface {
-		ExecContext(context.Context, string, ...any) (sql.Result, error)
+		ExecContext(context.Context, string, ...any) (stdsql.Result, error)
 	})
 	if !ok {
 		return nil, fmt.Errorf("Driver.ExecContext is not supported")
@@ -65,9 +67,9 @@ func (d *DebugDriver) Query(ctx context.Context, query string, args, v any) erro
 }
 
 // QueryContext logs its params and calls the underlying driver QueryContext method if it is supported.
-func (d *DebugDriver) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+func (d *DebugDriver) QueryContext(ctx context.Context, query string, args ...any) (*stdsql.Rows, error) {
 	drv, ok := d.Driver.(interface {
-		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+		QueryContext(context.Context, string, ...any) (*stdsql.Rows, error)
 	})
 	if !ok {
 		return nil, fmt.Errorf("Driver.QueryContext is not supported")
@@ -135,9 +137,9 @@ func (d *DebugTx) Exec(ctx context.Context, query string, args, v any) error {
 }
 
 // ExecContext logs its params and calls the underlying transaction ExecContext method if it is supported.
-func (d *DebugTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+func (d *DebugTx) ExecContext(ctx context.Context, query string, args ...any) (stdsql.Result, error) {
 	drv, ok := d.Tx.(interface {
-		ExecContext(context.Context, string, ...any) (sql.Result, error)
+		ExecContext(context.Context, string, ...any) (stdsql.Result, error)
 	})
 	if !ok {
 		return nil, fmt.Errorf("Tx.ExecContext is not supported")
@@ -161,9 +163,9 @@ func (d *DebugTx) Query(ctx context.Context, query string, args, v any) error {
 }
 
 // QueryContext logs its params and calls the underlying transaction QueryContext method if it is supported.
-func (d *DebugTx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+func (d *DebugTx) QueryContext(ctx context.Context, query string, args ...any) (*stdsql.Rows, error) {
 	drv, ok := d.Tx.(interface {
-		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+		QueryContext(context.Context, string, ...any) (*stdsql.Rows, error)
 	})
 	if !ok {
 		return nil, fmt.Errorf("Tx.QueryContext is not supported")

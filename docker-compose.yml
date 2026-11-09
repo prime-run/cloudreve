@@ -1,38 +1,56 @@
+# Full stack: Cloudreve + PostgreSQL + Redis.
+# For day-to-day host-run development prefer docker-compose.db.yml instead
+# (Postgres only, published on the host). Do not run both at once — both
+# bind host :5432.
+#
+# Credentials: copy .env.example → .env (or export the same variables).
 services:
   cloudreve:
     image: cloudreve/cloudreve:latest
     container_name: cloudreve-backend
     depends_on:
-      - postgresql
-      - redis
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
     ports:
       - 5212:5212
       - 6888:6888
       - 6888:6888/udp
     environment:
-      - CR_CONF_Database.Type=postgres
-      - CR_CONF_Database.Host=postgresql
-      - CR_CONF_Database.User=cloudreve
-      - CR_CONF_Database.Name=cloudreve
-      - CR_CONF_Database.Port=5432
-      - CR_CONF_Redis.Server=redis:6379
+      - CR_CONF_Database__Type=postgres
+      - CR_CONF_Database__Host=postgresql
+      - CR_CONF_Database__Port=5432
+      - CR_CONF_Database__User=${POSTGRES_USER:-cloudreve}
+      - CR_CONF_Database__Password=${POSTGRES_PASSWORD:-cloudreve_dev}
+      - CR_CONF_Database__Name=${POSTGRES_DB:-cloudreve}
+      - CR_CONF_Redis__Server=redis:6379
     volumes:
       - backend_data:/cloudreve/data
 
   postgresql:
-    # Best practice: Pin to major version. 
+    # Best practice: pin to major version.
     # NOTE: For major version jumps:
-    # backup & consult https://www.postgresql.org/docs/current/pgupgrade.html 
-    image: postgres:17    
+    # backup & consult https://www.postgresql.org/docs/current/pgupgrade.html
+    image: ${POSTGRES_IMAGE:-postgres:17}
     container_name: postgresql
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=cloudreve
-      - POSTGRES_DB=cloudreve
-      - POSTGRES_HOST_AUTH_METHOD=trust
+      POSTGRES_USER: ${POSTGRES_USER:-cloudreve}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cloudreve_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-cloudreve}
     volumes:
       - database_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-cloudreve} -d ${POSTGRES_DB:-cloudreve}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:latest
