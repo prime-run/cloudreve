@@ -253,8 +253,10 @@ func parseTeamRole(role string) (teammember.Role, error) {
 		return teammember.RoleAdmin, nil
 	case string(teammember.RoleMember):
 		return teammember.RoleMember, nil
+	case string(teammember.RoleViewer):
+		return teammember.RoleViewer, nil
 	default:
-		return "", serializer.NewError(serializer.CodeParamErr, "role must be owner, admin, or member", nil)
+		return "", serializer.NewError(serializer.CodeParamErr, "role must be owner, admin, member, or viewer", nil)
 	}
 }
 

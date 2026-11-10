@@ -6,6 +6,7 @@ import (
 
 	"github.com/cloudreve/Cloudreve/v4/application/constants"
 	"github.com/cloudreve/Cloudreve/v4/ent"
+	"github.com/cloudreve/Cloudreve/v4/ent/teammember"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
 	"github.com/cloudreve/Cloudreve/v4/pkg/boolset"
@@ -16,7 +17,10 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/pkg/setting"
 )
 
-var teamNavigatorCapability = &boolset.BooleanSet{}
+var (
+	teamNavigatorCapability       = &boolset.BooleanSet{}
+	teamViewerNavigatorCapability = &boolset.BooleanSet{}
+)
 
 // NewTeamNavigator creates a navigator for a team's shared file space.
 func NewTeamNavigator(u *ent.User, fileClient inventory.FileClient, teamClient inventory.TeamClient,
@@ -41,6 +45,7 @@ type teamNavigator struct {
 
 	root           *File
 	team           *ent.Team
+	role           teammember.Role
 	disableRecycle bool
 	persist        func()
 }
@@ -77,30 +82,41 @@ func (n *teamNavigator) RestoreState(s State) error {
 	return fmt.Errorf("invalid state type: %T", s)
 }
 
-func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
+// ensureMembership loads (and refreshes) the caller's role for the team in path.
+// Called from getNavigator before capability checks, and from To on every walk.
+func (n *teamNavigator) ensureMembership(ctx context.Context, path *fs.URI) (int, error) {
 	if inventory.IsAnonymousUser(n.user) {
-		return nil, ErrLoginRequired
+		return 0, ErrLoginRequired
 	}
 
 	teamHash := path.ID("")
 	if teamHash == "" {
-		return nil, fs.ErrPathNotExist.WithError(fmt.Errorf("team id required"))
+		return 0, fs.ErrPathNotExist.WithError(fmt.Errorf("team id required"))
 	}
 
 	teamID, err := n.hasher.Decode(teamHash, hashid.TeamID)
 	if err != nil {
-		return nil, fs.ErrPathNotExist.WithError(fmt.Errorf("invalid team id"))
+		return 0, fs.ErrPathNotExist.WithError(fmt.Errorf("invalid team id"))
 	}
 
-	// Re-validate membership on every To so removed members lose access immediately,
-	// including after navigator state restore.
-	if _, err := n.teamClient.GetMembership(ctx, teamID, n.user.ID); err != nil {
+	m, err := n.teamClient.GetMembership(ctx, teamID, n.user.ID)
+	if err != nil {
 		if ent.IsNotFound(err) {
 			n.root = nil
 			n.team = nil
-			return nil, ErrPermissionDenied
+			n.role = ""
+			return 0, ErrPermissionDenied
 		}
-		return nil, fmt.Errorf("failed to get team membership: %w", err)
+		return 0, fmt.Errorf("failed to get team membership: %w", err)
+	}
+	n.role = m.Role
+	return teamID, nil
+}
+
+func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
+	teamID, err := n.ensureMembership(ctx, path)
+	if err != nil {
+		return nil, err
 	}
 
 	if n.root == nil || n.team == nil || n.team.ID != teamID {
@@ -124,8 +140,9 @@ func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
 		// Use requesting user as OwnerModel so storage policy / capacity resolve to the member.
 		n.root.OwnerModel = n.user
 		n.root.IsUserRoot = true
-		n.root.CapabilitiesBs = n.Capabilities(false).Capability
 	}
+	// Keep the whole restored/cached tree aligned with the latest membership role.
+	n.refreshCapabilities()
 
 	current, lastAncestor := n.root, n.root
 	elements := path.Elements()
@@ -140,6 +157,26 @@ func (n *teamNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
 	return current, nil
 }
 
+// refreshCapabilities stamps the current role's capability set onto every
+// cached file under root (including context-hint restored non-leaves).
+func (n *teamNavigator) refreshCapabilities() {
+	if n.root == nil {
+		return
+	}
+	caps := n.Capabilities(false).Capability
+	var walk func(*File)
+	walk = func(f *File) {
+		if f == nil {
+			return
+		}
+		f.CapabilitiesBs = caps
+		for _, child := range f.Children {
+			walk(child)
+		}
+	}
+	walk(n.root)
+}
+
 func (n *teamNavigator) Children(ctx context.Context, parent *File, args *ListArgs) (*ListResult, error) {
 	return n.baseNavigator.children(ctx, parent, args)
 }
@@ -149,8 +186,14 @@ func (n *teamNavigator) walkNext(ctx context.Context, root *File, next string, i
 }
 
 func (n *teamNavigator) Capabilities(isSearching bool) *fs.NavigatorProps {
+	// Default to viewer (least privilege). Only known write roles get full caps.
+	caps := teamViewerNavigatorCapability
+	switch n.role {
+	case teammember.RoleOwner, teammember.RoleAdmin, teammember.RoleMember:
+		caps = teamNavigatorCapability
+	}
 	res := &fs.NavigatorProps{
-		Capability:            teamNavigatorCapability,
+		Capability:            caps,
 		OrderDirectionOptions: fullOrderDirectionOption,
 		OrderByOptions:        fullOrderByOption,
 		MaxPageSize:           n.config.MaxPageSize,

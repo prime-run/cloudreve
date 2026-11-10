@@ -502,7 +502,7 @@ var (
 		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"mysql": "datetime"}},
 		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"mysql": "datetime"}},
 		{Name: "deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"mysql": "datetime"}},
-		{Name: "role", Type: field.TypeEnum, Enums: []string{"owner", "admin", "member"}, Default: "member"},
+		{Name: "role", Type: field.TypeEnum, Enums: []string{"owner", "admin", "member", "viewer"}, Default: "member"},
 		{Name: "team_id", Type: field.TypeInt},
 		{Name: "user_id", Type: field.TypeInt},
 	}

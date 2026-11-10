@@ -162,6 +162,13 @@ func init() {
 		NavigatorCapabilityEnterFolder:    true,
 		NavigatorCapabilityModifyProps:    true,
 	}, teamNavigatorCapability)
+	boolset.Sets(map[NavigatorCapability]bool{
+		NavigatorCapabilityListChildren:  true,
+		NavigatorCapabilityDownloadFile:  true,
+		NavigatorCapabilityEnterFolder:   true,
+		NavigatorCapabilityInfo:          true,
+		NavigatorCapabilityGenerateThumb: true,
+	}, teamViewerNavigatorCapability)
 }
 
 // ==================== Base Navigator ====================
