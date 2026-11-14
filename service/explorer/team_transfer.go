@@ -274,6 +274,15 @@ func createTransferStubInTx(
 			}
 			return nil, "", nil, err
 		}
+		// CreateFolder's ON CONFLICT DO NOTHING returns the existing row and
+		// writes metadata onto it. A non-symbolic result is that raced folder.
+		if isDir && !stub.IsSymbolic {
+			if _, rbErr := fc.GetClient().ExecContext(ctx, "ROLLBACK TO SAVEPOINT tt_stub_name"); rbErr != nil {
+				return nil, "", nil, rbErr
+			}
+			lastErr = fmt.Errorf("folder name %q already exists", name)
+			continue
+		}
 
 		params.DestFileID = stub.ID
 		tr, err := tc.Create(ctx, params)

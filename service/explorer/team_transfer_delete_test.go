@@ -166,6 +166,172 @@ SELECT value FROM metadata WHERE file_id = ? AND name = 'sys:team_transfer_redir
 	require.Contains(t, redirect, "@teamtransfer")
 }
 
+// hideChildOnce makes the pre-check miss one committed name so CreateFolder/CreateFile
+// run against a row that already exists.
+type hideChildOnce struct {
+	inventory.FileClient
+	name string
+	used bool
+}
+
+func (h *hideChildOnce) GetChildFile(ctx context.Context, root *ent.File, ownerID int, child string, eagerLoading bool) (*ent.File, error) {
+	if !h.used && child == h.name {
+		h.used = true
+		return nil, &ent.NotFoundError{}
+	}
+	return h.FileClient.GetChildFile(ctx, root, ownerID, child, eagerLoading)
+}
+
+func assertNoTransferRedirect(t *testing.T, client *ent.Client, fileID int) {
+	t.Helper()
+	rows, err := client.QueryContext(context.Background(), `
+SELECT COUNT(*) FROM metadata WHERE file_id = ? AND name = 'sys:team_transfer_redirect'`, fileID)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next())
+	var n int
+	require.NoError(t, rows.Scan(&n))
+	require.Zero(t, n)
+}
+
+func assertTransferRedirect(t *testing.T, client *ent.Client, fileID int) {
+	t.Helper()
+	rows, err := client.QueryContext(context.Background(), `
+SELECT value FROM metadata WHERE file_id = ? AND name = 'sys:team_transfer_redirect'`, fileID)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next())
+	var redirect string
+	require.NoError(t, rows.Scan(&redirect))
+	require.NotContains(t, redirect, "pending@")
+	require.Contains(t, redirect, "@teamtransfer")
+}
+
+func TestCreateFolderStubSkipsExistingChild(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	existing, err := client.File.Create().
+		SetType(int(types.FileTypeFolder)).
+		SetName("Reports").
+		SetOwnerID(parent.OwnerID).
+		SetIsSymbolic(false).
+		SetParent(parent).
+		Save(ctx)
+	require.NoError(t, err)
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
+	require.NoError(t, err)
+	tcTx, _ := inventory.InheritTx(txCtx, tc)
+
+	stub, name, _, err := createTransferStubInTx(txCtx, fcTx, tcTx, hasher, parent, "Reports", true, &inventory.CreateTeamTransferParams{
+		SourceFileID: parent.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+	}, map[string]string{"sys:transfer_from_team_name": "A"})
+	require.NoError(t, err)
+	require.Equal(t, "Reports (1)", name)
+	require.NotEqual(t, existing.ID, stub.ID)
+	require.NoError(t, inventory.Commit(tx))
+
+	got, err := client.File.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.False(t, got.IsSymbolic)
+	assertNoTransferRedirect(t, client, existing.ID)
+
+	created, err := client.File.Get(ctx, stub.ID)
+	require.NoError(t, err)
+	require.True(t, created.IsSymbolic)
+	require.Equal(t, "Reports (1)", created.Name)
+	assertTransferRedirect(t, client, stub.ID)
+}
+
+func TestCreateFolderStubRollsBackRacedExisting(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	existing, err := client.File.Create().
+		SetType(int(types.FileTypeFolder)).
+		SetName("Reports").
+		SetOwnerID(parent.OwnerID).
+		SetIsSymbolic(false).
+		SetParent(parent).
+		Save(ctx)
+	require.NoError(t, err)
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
+	require.NoError(t, err)
+	tcTx, _ := inventory.InheritTx(txCtx, tc)
+	hidden := &hideChildOnce{FileClient: fcTx, name: "Reports"}
+
+	stub, name, _, err := createTransferStubInTx(txCtx, hidden, tcTx, hasher, parent, "Reports", true, &inventory.CreateTeamTransferParams{
+		SourceFileID: parent.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+	}, map[string]string{"sys:transfer_from_team_name": "A"})
+	require.NoError(t, err)
+	require.True(t, hidden.used)
+	require.Equal(t, "Reports (1)", name)
+	require.NotEqual(t, existing.ID, stub.ID)
+	require.NoError(t, inventory.Commit(tx))
+
+	got, err := client.File.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.False(t, got.IsSymbolic)
+	assertNoTransferRedirect(t, client, existing.ID)
+
+	created, err := client.File.Get(ctx, stub.ID)
+	require.NoError(t, err)
+	require.True(t, created.IsSymbolic)
+	assertTransferRedirect(t, client, stub.ID)
+}
+
+func TestCreateFileStubRollsBackUniqueInsideSavepoint(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, existing, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	policy, err := client.StoragePolicy.Create().SetName("local").SetType("local").Save(ctx)
+	require.NoError(t, err)
+	parent.StoragePolicyFiles = policy.ID
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
+	require.NoError(t, err)
+	tcTx, _ := inventory.InheritTx(txCtx, tc)
+	hidden := &hideChildOnce{FileClient: fcTx, name: "doc.txt"}
+
+	stub, name, _, err := createTransferStubInTx(txCtx, hidden, tcTx, hasher, parent, "doc.txt", false, &inventory.CreateTeamTransferParams{
+		SourceFileID: parent.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+	}, map[string]string{"sys:transfer_from_team_name": "A"})
+	require.NoError(t, err)
+	require.True(t, hidden.used)
+	require.Equal(t, "doc (1).txt", name)
+	require.NotEqual(t, existing.ID, stub.ID)
+	require.NoError(t, inventory.Commit(tx))
+
+	got, err := client.File.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.Equal(t, "doc.txt", got.Name)
+	assertNoTransferRedirect(t, client, existing.ID)
+	assertTransferRedirect(t, client, stub.ID)
+}
+
 func scanTransferRow(t *testing.T, client *ent.Client, id int) (sql.NullString, sql.NullInt64, sql.NullInt64) {
 	t.Helper()
 	rows, err := client.QueryContext(context.Background(), `SELECT deleted_at, source_file_id, dest_file_id FROM team_transfers WHERE id = ?`, id)
