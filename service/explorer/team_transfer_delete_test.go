@@ -296,6 +296,80 @@ func TestCreateFolderStubRollsBackRacedExisting(t *testing.T) {
 	assertTransferRedirect(t, client, stub.ID)
 }
 
+func TestCreateFolderStubRollsBackRacedSymbolic(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	existing, err := client.File.Create().
+		SetType(int(types.FileTypeFolder)).
+		SetName("Reports").
+		SetOwnerID(parent.OwnerID).
+		SetIsSymbolic(true).
+		SetParent(parent).
+		Save(ctx)
+	require.NoError(t, err)
+	_, err = client.Metadata.Create().
+		SetName("keep-me").
+		SetValue("original").
+		SetFile(existing).
+		SetIsPublic(true).
+		Save(ctx)
+	require.NoError(t, err)
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
+	require.NoError(t, err)
+	tcTx, _ := inventory.InheritTx(txCtx, tc)
+	hidden := &hideChildOnce{FileClient: fcTx, name: "Reports"}
+
+	stub, name, _, err := createTransferStubInTx(txCtx, hidden, tcTx, hasher, parent, "Reports", true, &inventory.CreateTeamTransferParams{
+		SourceFileID: parent.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+	}, map[string]string{"sys:transfer_from_team_name": "A"})
+	require.NoError(t, err)
+	require.True(t, hidden.used)
+	require.Equal(t, "Reports (1)", name)
+	require.NotEqual(t, existing.ID, stub.ID)
+	require.NoError(t, inventory.Commit(tx))
+
+	got, err := client.File.Get(ctx, existing.ID)
+	require.NoError(t, err)
+	require.True(t, got.IsSymbolic)
+	assertNoTransferRedirect(t, client, existing.ID)
+	assertMetadataValue(t, client, existing.ID, "keep-me", "original")
+
+	created, err := client.File.Get(ctx, stub.ID)
+	require.NoError(t, err)
+	require.True(t, created.IsSymbolic)
+	require.Equal(t, "Reports (1)", created.Name)
+	assertTransferRedirect(t, client, stub.ID)
+
+	rows, err := client.QueryContext(ctx, `SELECT COUNT(*) FROM team_transfers WHERE dest_file_id = ?`, existing.ID)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next())
+	var n int
+	require.NoError(t, rows.Scan(&n))
+	require.Zero(t, n)
+}
+
+func assertMetadataValue(t *testing.T, client *ent.Client, fileID int, key, want string) {
+	t.Helper()
+	rows, err := client.QueryContext(context.Background(), `
+SELECT value FROM metadata WHERE file_id = ? AND name = ?`, fileID, key)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next())
+	var got string
+	require.NoError(t, rows.Scan(&got))
+	require.Equal(t, want, got)
+}
+
 func TestCreateFileStubRollsBackUniqueInsideSavepoint(t *testing.T) {
 	ctx := context.Background()
 	client := openTransferTestDB(t)

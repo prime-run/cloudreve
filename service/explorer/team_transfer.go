@@ -245,12 +245,15 @@ func createTransferStubInTx(
 		var stub *ent.File
 		var err error
 		if isDir {
-			stub, err = fc.CreateFolder(ctx, parent, &inventory.CreateFolderParameters{
-				Owner:      parent.OwnerID,
-				Name:       name,
-				IsSymbolic: true,
-				Metadata:   meta,
-			})
+			// Plain insert. CreateFolder's ON CONFLICT DO NOTHING would return
+			// a raced symbolic sibling and write this transfer onto it.
+			stub, err = fc.GetClient().File.Create().
+				SetOwnerID(parent.OwnerID).
+				SetType(int(types.FileTypeFolder)).
+				SetName(name).
+				SetParent(parent).
+				SetIsSymbolic(true).
+				Save(ctx)
 		} else {
 			fileArgs := &inventory.CreateFileParameters{
 				FileType:   types.FileTypeFile,
@@ -274,14 +277,10 @@ func createTransferStubInTx(
 			}
 			return nil, "", nil, err
 		}
-		// CreateFolder's ON CONFLICT DO NOTHING returns the existing row and
-		// writes metadata onto it. A non-symbolic result is that raced folder.
-		if isDir && !stub.IsSymbolic {
-			if _, rbErr := fc.GetClient().ExecContext(ctx, "ROLLBACK TO SAVEPOINT tt_stub_name"); rbErr != nil {
-				return nil, "", nil, rbErr
+		if isDir {
+			if err := fc.UpsertMetadata(ctx, stub, meta, nil); err != nil {
+				return nil, "", nil, err
 			}
-			lastErr = fmt.Errorf("folder name %q already exists", name)
-			continue
 		}
 
 		params.DestFileID = stub.ID
