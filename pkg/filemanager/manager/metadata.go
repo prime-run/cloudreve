@@ -32,6 +32,12 @@ const (
 	emojiIconMetadataKey      = customizeMetadataSuffix + ":emoji"
 	shareOwnerMetadataKey     = dbfs.MetadataSysPrefix + "shared_owner"
 	shareRedirectMetadataKey  = dbfs.MetadataSysPrefix + "shared_redirect"
+	teamTransferRedirectKey   = dbfs.MetadataTeamTransferRedirect
+	transferFromTeamKey       = dbfs.MetadataTransferFromTeam
+	transferFromTeamNameKey   = dbfs.MetadataTransferFromTeamName
+	transferByKey             = dbfs.MetadataTransferBy
+	transferByNickKey         = dbfs.MetadataTransferByNick
+	transferAllowWriteKey     = dbfs.MetadataTransferAllowWrite
 )
 
 var (
@@ -91,6 +97,14 @@ var (
 					}
 
 					return nil
+				}
+
+				// Team-transfer provenance is set only via inventory in the
+				// transfer API (bypasses this validator). Reject public forgeries.
+				switch patch.Key {
+				case teamTransferRedirectKey, transferFromTeamKey, transferFromTeamNameKey,
+					transferByKey, transferByNickKey, transferAllowWriteKey:
+					return fmt.Errorf("team transfer metadata can only be set by the transfer API")
 				}
 
 				return fmt.Errorf("unsupported system metadata key: %s", patch.Key)

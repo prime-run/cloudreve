@@ -55,6 +55,7 @@ func (User) Edges() []ent.Edge {
 		edge.To("entities", Entity.Type),
 		edge.To("oauth_grants", OAuthGrant.Type),
 		edge.To("team_memberships", TeamMember.Type),
+		edge.To("created_team_transfers", TeamTransfer.Type),
 	}
 }
 

@@ -257,6 +257,7 @@ func (f *DBFS) SoftDelete(ctx context.Context, path ...*fs.URI) error {
 		return err
 	}
 	ae := serializer.NewAggregateError()
+	fileNavGroup := make(map[Navigator][]*File)
 	targets := make([]*File, 0, len(path))
 	for _, p := range path {
 		// Get navigator
@@ -285,6 +286,7 @@ func (f *DBFS) SoftDelete(ctx context.Context, path ...*fs.URI) error {
 		}
 
 		targets = append(targets, target)
+		fileNavGroup[navigator] = append(fileNavGroup[navigator], target)
 	}
 
 	if len(targets) == 0 {
@@ -304,6 +306,12 @@ func (f *DBFS) SoftDelete(ctx context.Context, path ...*fs.URI) error {
 	fc, tx, ctx, err := inventory.WithTx(ctx, f.fileClient)
 	if err != nil {
 		return serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
+	}
+
+	// Revoke live transfers for soft-deleted stubs (including folder descendants).
+	if err := f.revokeTransfersInNavGroup(ctx, fileNavGroup); err != nil {
+		_ = inventory.Rollback(tx)
+		return serializer.NewError(serializer.CodeDBError, "failed to revoke team transfers", err)
 	}
 
 	for _, target := range targets {
@@ -909,6 +917,12 @@ func (f *DBFS) deleteFiles(ctx context.Context, targets map[Navigator][]*File, f
 			return nil, nil, nil, fmt.Errorf("failed to walk files: %w", err)
 		}
 
+		// Revoke team transfers referencing these files (dest stubs or sources)
+		// before the hard DELETE so FKs do not block the file removal.
+		if err := f.revokeTransfersForFiles(ctx, toBeDeletedFiles); err != nil {
+			return nil, nil, nil, err
+		}
+
 		// Delete files
 		staleEntities, diff, err := fc.Delete(ctx, lo.Map(toBeDeletedFiles, func(item *File, index int) *ent.File {
 			return item.Model
@@ -923,6 +937,46 @@ func (f *DBFS) deleteFiles(ctx context.Context, targets map[Navigator][]*File, f
 	}
 
 	return allStaleEntities, storageDiff, indexToDelete, nil
+}
+
+// revokeTransfersForFiles soft-deletes team_transfers rows and nulls FK columns
+// for every file id about to be hard-deleted (as dest stub and/or as source).
+func (f *DBFS) revokeTransfersForFiles(ctx context.Context, files []*File) error {
+	if f.transferClient == nil || len(files) == 0 {
+		return nil
+	}
+	tc, _ := inventory.InheritTx(ctx, f.transferClient)
+	ids := lo.Map(files, func(item *File, _ int) int { return item.ID() })
+	if err := tc.SoftDeleteByDestFileIDs(ctx, ids); err != nil {
+		return fmt.Errorf("failed to revoke transfers by dest file: %w", err)
+	}
+	if err := tc.SoftDeleteBySourceFileIDs(ctx, ids); err != nil {
+		return fmt.Errorf("failed to revoke transfers by source file: %w", err)
+	}
+	return nil
+}
+
+// revokeTransfersInNavGroup walks each navigator group and revokes transfers for all descendants.
+func (f *DBFS) revokeTransfersInNavGroup(ctx context.Context, targets map[Navigator][]*File) error {
+	for n, files := range targets {
+		reset, err := n.FollowTx(ctx)
+		if err != nil {
+			return err
+		}
+		walked := make([]*File, 0)
+		if err := n.Walk(ctx, files, intsets.MaxInt, intsets.MaxInt, func(targets []*File, level int) error {
+			walked = append(walked, targets...)
+			return nil
+		}); err != nil {
+			reset()
+			return fmt.Errorf("failed to walk files for transfer revoke: %w", err)
+		}
+		reset()
+		if err := f.revokeTransfersForFiles(ctx, walked); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (f *DBFS) copyFiles(ctx context.Context, targets map[Navigator][]*File, destination *File, fc inventory.FileClient) (map[int]*ent.File, inventory.StorageDiff, *fs.IndexDiff, error) {

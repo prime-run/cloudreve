@@ -46,7 +46,7 @@ func NewDatabaseFS(u *ent.User, fileClient inventory.FileClient, shareClient inv
 	l logging.Logger, ls lock.LockSystem, settingClient setting.Provider,
 	storagePolicyClient inventory.StoragePolicyClient, hasher hashid.Encoder, userClient inventory.UserClient,
 	cache, stateKv cache.Driver, directLinkClient inventory.DirectLinkClient, encryptorFactory encrypt.CryptorFactory,
-	eventHub eventhub.EventHub, teamClient inventory.TeamClient) fs.FileSystem {
+	eventHub eventhub.EventHub, teamClient inventory.TeamClient, transferClient inventory.TeamTransferClient) fs.FileSystem {
 	return &DBFS{
 		user:                u,
 		navigators:          make(map[string]Navigator),
@@ -64,6 +64,7 @@ func NewDatabaseFS(u *ent.User, fileClient inventory.FileClient, shareClient inv
 		encryptorFactory:    encryptorFactory,
 		eventHub:            eventHub,
 		teamClient:          teamClient,
+		transferClient:      transferClient,
 	}
 }
 
@@ -76,6 +77,7 @@ type DBFS struct {
 	shareClient         inventory.ShareClient
 	directLinkClient    inventory.DirectLinkClient
 	teamClient          inventory.TeamClient
+	transferClient      inventory.TeamTransferClient
 	l                   logging.Logger
 	ls                  lock.LockSystem
 	settingClient       setting.Provider
@@ -266,33 +268,59 @@ func (f *DBFS) applyStorageDiff(ctx context.Context, diff inventory.StorageDiff)
 	return f.userClient.ApplyStorageDiff(ctx, diff)
 }
 
-// withTeamStorageCtx injects TeamStorageIDCtx when uri points at a team drive.
-// Requires the current user to be a member of the team.
+// withTeamStorageCtx injects TeamStorageIDCtx when uri points at a team drive
+// or a write-through team transfer (quota stays on the source team).
 func (f *DBFS) withTeamStorageCtx(ctx context.Context, uri *fs.URI) (context.Context, *ent.Team, error) {
-	if uri == nil || uri.FileSystem() != constants.FileSystemTeam {
+	if uri == nil {
 		return ctx, nil, nil
 	}
-	teamHash := uri.ID("")
-	if teamHash == "" {
-		return ctx, nil, nil
-	}
-	teamID, err := f.hasher.Decode(teamHash, hashid.TeamID)
-	if err != nil {
-		return ctx, nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
-	}
-	if f.user != nil && !inventory.IsAnonymousUser(f.user) {
-		if _, err := f.teamClient.GetMembership(ctx, teamID, f.user.ID); err != nil {
-			if ent.IsNotFound(err) {
-				return ctx, nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a team member", err)
-			}
-			return ctx, nil, serializer.NewError(serializer.CodeDBError, "Failed to check team membership", err)
+	switch uri.FileSystem() {
+	case constants.FileSystemTeam:
+		teamHash := uri.ID("")
+		if teamHash == "" {
+			return ctx, nil, nil
 		}
+		teamID, err := f.hasher.Decode(teamHash, hashid.TeamID)
+		if err != nil {
+			return ctx, nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
+		}
+		if f.user != nil && !inventory.IsAnonymousUser(f.user) {
+			if _, err := f.teamClient.GetMembership(ctx, teamID, f.user.ID); err != nil {
+				if ent.IsNotFound(err) {
+					return ctx, nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a team member", err)
+				}
+				return ctx, nil, serializer.NewError(serializer.CodeDBError, "Failed to check team membership", err)
+			}
+		}
+		t, err := f.teamClient.GetByID(ctx, teamID)
+		if err != nil {
+			return ctx, nil, serializer.NewError(serializer.CodeNotFound, "Team not found", err)
+		}
+		return context.WithValue(ctx, inventory.TeamStorageIDCtx{}, teamID), t, nil
+	case constants.FileSystemTeamTransfer:
+		transferHash := uri.ID("")
+		if transferHash == "" {
+			return ctx, nil, nil
+		}
+		transferID, err := f.hasher.Decode(transferHash, hashid.TeamTransferID)
+		if err != nil {
+			return ctx, nil, serializer.NewError(serializer.CodeParamErr, "Invalid transfer id", err)
+		}
+		tr, err := f.transferClient.GetByID(ctx, transferID)
+		if err != nil {
+			return ctx, nil, serializer.NewError(serializer.CodeNotFound, "Transfer not found", err)
+		}
+		if !tr.AllowWrite {
+			return ctx, nil, nil
+		}
+		t, err := f.teamClient.GetByID(ctx, tr.SourceTeamID)
+		if err != nil {
+			return ctx, nil, serializer.NewError(serializer.CodeNotFound, "Source team not found", err)
+		}
+		return context.WithValue(ctx, inventory.TeamStorageIDCtx{}, tr.SourceTeamID), t, nil
+	default:
+		return ctx, nil, nil
 	}
-	t, err := f.teamClient.GetByID(ctx, teamID)
-	if err != nil {
-		return ctx, nil, serializer.NewError(serializer.CodeNotFound, "Team not found", err)
-	}
-	return context.WithValue(ctx, inventory.TeamStorageIDCtx{}, teamID), t, nil
 }
 
 func (f *DBFS) CreateEntity(ctx context.Context, file fs.File, policy *ent.StoragePolicy,
@@ -377,7 +405,7 @@ func (f *DBFS) SharedAddressTranslation(ctx context.Context, path *fs.URI, opts 
 	}
 
 	uriTranslation := func(target *File, rebase bool) (fs.File, *fs.URI, error) {
-		// Translate shared address to real address
+		// Translate shared / team-transfer symbolic address to real address
 		metadata := target.Metadata()
 		if metadata == nil {
 			if err := f.fileClient.QueryMetadata(ctx, target.Model); err != nil {
@@ -385,9 +413,12 @@ func (f *DBFS) SharedAddressTranslation(ctx context.Context, path *fs.URI, opts 
 			}
 			metadata = target.Metadata()
 		}
-		redirect, ok := metadata[MetadataSharedRedirect]
+		redirect, ok := metadata[MetadataTeamTransferRedirect]
 		if !ok {
-			return nil, nil, fmt.Errorf("missing metadata %s in symbolic folder %s", MetadataSharedRedirect, path)
+			redirect, ok = metadata[MetadataSharedRedirect]
+		}
+		if !ok {
+			return nil, nil, fmt.Errorf("missing redirect metadata in symbolic folder %s", path)
 		}
 
 		redirectUri, err := fs.NewUriFromString(redirect)
@@ -723,13 +754,21 @@ func (f *DBFS) generateEncryptMetadata(ctx context.Context, uploadRequest *fs.Up
 }
 
 // getPreferredPolicy tries to get the preferred storage policy for the given file.
+// Prefer the file's own storage_policy_files when set; otherwise the owner's group policy.
 func (f *DBFS) getPreferredPolicy(ctx context.Context, file *File) (*ent.StoragePolicy, error) {
+	sc, _ := inventory.InheritTx(ctx, f.storagePolicyClient)
+	if pid := file.PolicyID(); pid > 0 {
+		policy, err := sc.GetPolicyByID(ctx, pid)
+		if err == nil {
+			return policy, nil
+		}
+	}
+
 	ownerGroup := file.Owner().Edges.Group
 	if ownerGroup == nil {
 		return nil, fmt.Errorf("owner group not loaded")
 	}
 
-	sc, _ := inventory.InheritTx(ctx, f.storagePolicyClient)
 	groupPolicy, err := sc.GetByGroup(ctx, ownerGroup)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to get available storage policies", err)
@@ -795,6 +834,8 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 			n = NewSharedWithMeNavigator(f.user, f.fileClient, f.l, config, f.hasher)
 		case constants.FileSystemTeam:
 			n = NewTeamNavigator(f.user, f.fileClient, f.teamClient, f.l, config, f.hasher)
+		case constants.FileSystemTeamTransfer:
+			n = NewTeamTransferNavigator(f.user, f.fileClient, f.teamClient, f.transferClient, f.userClient, f.l, config, f.hasher)
 		default:
 			f.mu.Unlock()
 			return nil, fmt.Errorf("unknown file system %q", pathFs)
@@ -826,6 +867,12 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 			return nil, err
 		}
 	}
+	// Team-transfer write caps depend on allow_write; load the row before the capability check.
+	if ttn, ok := res.(*teamTransferNavigator); ok {
+		if err := ttn.loadTransferForCaps(ctx, path); err != nil {
+			return nil, err
+		}
+	}
 
 	// Check fs capabilities
 	capabilities := res.Capabilities(false).Capability
@@ -849,6 +896,8 @@ func (f *DBFS) navigatorId(path *fs.URI) string {
 		return fmt.Sprintf("%s/%s", constants.FileSystemTrash, path.ID(uidHashed))
 	case constants.FileSystemTeam:
 		return fmt.Sprintf("%s/%s/%d", constants.FileSystemTeam, path.ID(""), f.user.ID)
+	case constants.FileSystemTeamTransfer:
+		return fmt.Sprintf("%s/%s/%d", constants.FileSystemTeamTransfer, path.ID(""), f.user.ID)
 	default:
 		return fmt.Sprintf("%s/%s/%d", path.FileSystem(), path.ID(uidHashed), f.user.ID)
 	}
@@ -899,7 +948,7 @@ func canMoveOrCopyTo(src, dst *fs.URI, isCopy bool) bool {
 }
 
 // ownerAllowed reports whether the current user may mutate a file.
-// Team membership is authorized by the team navigator; owner checks are skipped for team URIs.
+// Team membership / team-transfer access is authorized by the navigator; owner checks are skipped.
 func (f *DBFS) ownerAllowed(ctx context.Context, ownerID int, uri *fs.URI) bool {
 	if _, ok := ctx.Value(ByPassOwnerCheckCtxKey{}).(bool); ok {
 		return true
@@ -907,7 +956,7 @@ func (f *DBFS) ownerAllowed(ctx context.Context, ownerID int, uri *fs.URI) bool 
 	if ownerID == f.user.ID {
 		return true
 	}
-	if uri != nil && uri.FileSystem() == constants.FileSystemTeam {
+	if uri != nil && (uri.FileSystem() == constants.FileSystemTeam || uri.FileSystem() == constants.FileSystemTeamTransfer) {
 		return true
 	}
 	return false

@@ -3,7 +3,7 @@ package constants
 // These values will be injected at build time, DO NOT EDIT.
 
 // BackendVersion 当前后端版本号
-var BackendVersion = "4.17.0"
+var BackendVersion = "4.18.1"
 
 // IsPro 是否为Pro版本
 var IsPro = "false"
@@ -31,5 +31,6 @@ const (
 	FileSystemTrash        = FileSystemType("trash")
 	FileSystemSharedWithMe = FileSystemType("shared_with_me")
 	FileSystemTeam         = FileSystemType("team")
+	FileSystemTeamTransfer = FileSystemType("teamtransfer")
 	FileSystemUnknown      = FileSystemType("unknown")
 )

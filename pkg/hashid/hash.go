@@ -23,6 +23,7 @@ const (
 	DavAccountID
 	PaymentID
 	TeamID
+	TeamTransferID
 )
 
 var (
@@ -151,6 +152,12 @@ func EncodeSourceLinkID(encoder Encoder, id int) string {
 // EncodeTeamID encode team id to hash id
 func EncodeTeamID(encoder Encoder, id int) string {
 	res, _ := encoder.Encode([]int{id, TeamID})
+	return res
+}
+
+// EncodeTeamTransferID encode team transfer id to hash id
+func EncodeTeamTransferID(encoder Encoder, id int) string {
+	res, _ := encoder.Encode([]int{id, TeamTransferID})
 	return res
 }
 

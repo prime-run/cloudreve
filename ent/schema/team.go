@@ -39,5 +39,7 @@ func (Team) Edges() []ent.Edge {
 			Unique().
 			Required(),
 		edge.To("members", TeamMember.Type),
+		edge.To("outgoing_transfers", TeamTransfer.Type),
+		edge.To("incoming_transfers", TeamTransfer.Type),
 	}
 }

@@ -15,3 +15,13 @@ func ListTeams(c *gin.Context) {
 	}
 	c.JSON(200, serializer.Response{Data: res})
 }
+
+// TeamDirectory lists all teams for transfer destination pickers.
+func TeamDirectory(c *gin.Context) {
+	res, err := team.Directory(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
