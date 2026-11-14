@@ -222,12 +222,25 @@ func createTransferStubInTx(
 			name = fmt.Sprintf("%s (%d)%s", stem, attempt, ext)
 		}
 
+		if existing, err := fc.GetChildFile(ctx, parent, parent.OwnerID, name, false); err == nil && existing != nil {
+			lastErr = fmt.Errorf("name %q already exists", name)
+			continue
+		} else if err != nil && !ent.IsNotFound(err) {
+			return nil, "", nil, err
+		}
+
 		meta := make(map[string]string, len(provenance)+1)
 		for k, v := range provenance {
 			meta[k] = v
 		}
 		// Placeholder until we know the transfer id; replaced before commit.
 		meta[dbfs.MetadataTeamTransferRedirect] = fmt.Sprintf("%s://pending@%s", constants.CloudreveScheme, constants.FileSystemTeamTransfer)
+
+		// Savepoint so a unique (parent, name) violation does not abort the
+		// Postgres transaction; the next attempt can insert "name (n)".
+		if _, err := fc.GetClient().ExecContext(ctx, "SAVEPOINT tt_stub_name"); err != nil {
+			return nil, "", nil, err
+		}
 
 		var stub *ent.File
 		var err error
@@ -239,16 +252,23 @@ func createTransferStubInTx(
 				Metadata:   meta,
 			})
 		} else {
-			stub, _, _, err = fc.CreateFile(ctx, parent, &inventory.CreateFileParameters{
+			fileArgs := &inventory.CreateFileParameters{
 				FileType:   types.FileTypeFile,
 				Name:       name,
 				IsSymbolic: true,
 				OwnerID:    parent.OwnerID,
 				Metadata:   meta,
-			})
+			}
+			if parent.StoragePolicyFiles > 0 {
+				fileArgs.StoragePolicyID = parent.StoragePolicyFiles
+			}
+			stub, _, _, err = fc.CreateFile(ctx, parent, fileArgs)
 		}
 		if err != nil {
-			if ent.IsConstraintError(err) {
+			if isNameConflict(err) {
+				if _, rbErr := fc.GetClient().ExecContext(ctx, "ROLLBACK TO SAVEPOINT tt_stub_name"); rbErr != nil {
+					return nil, "", nil, rbErr
+				}
 				lastErr = err
 				continue
 			}
@@ -267,9 +287,23 @@ func createTransferStubInTx(
 		}, nil); err != nil {
 			return nil, "", nil, err
 		}
+		if _, err := fc.GetClient().ExecContext(ctx, "RELEASE SAVEPOINT tt_stub_name"); err != nil {
+			return nil, "", nil, err
+		}
 		return stub, name, tr, nil
 	}
 	return nil, "", nil, fmt.Errorf("could not allocate unique stub name for %q: %w", baseName, lastErr)
+}
+
+func isNameConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "foreign key") {
+		return false
+	}
+	return strings.Contains(msg, "unique") || strings.Contains(msg, "duplicate")
 }
 
 // DeleteTeamTransfer revokes a transfer by id.
@@ -313,6 +347,9 @@ func DeleteTeamTransfer(c *gin.Context) error {
 	if err != nil {
 		return serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
 	}
+	// File.Delete requires the entities edge; without this flag GetByID leaves it unloaded
+	// and the delete error rolls the soft-delete back.
+	txCtx = context.WithValue(txCtx, inventory.LoadFileEntity{}, true)
 	tc, _ := inventory.InheritTx(txCtx, transferClient)
 
 	destFileID := tr.DestFileID
@@ -321,11 +358,15 @@ func DeleteTeamTransfer(c *gin.Context) error {
 		return serializer.NewError(serializer.CodeDBError, "Failed to revoke transfer", err)
 	}
 	if destFileID > 0 {
-		if stub, err := fc.GetByID(txCtx, destFileID); err == nil {
-			if _, _, err := fc.Delete(txCtx, []*ent.File{stub}, nil); err != nil {
+		stub, err := fc.GetByID(txCtx, destFileID)
+		if err != nil {
+			if !ent.IsNotFound(err) {
 				_ = inventory.Rollback(tx)
-				return serializer.NewError(serializer.CodeDBError, "Failed to delete transfer stub", err)
+				return serializer.NewError(serializer.CodeDBError, "Failed to load transfer stub", err)
 			}
+		} else if _, _, err := fc.Delete(txCtx, []*ent.File{stub}, nil); err != nil {
+			_ = inventory.Rollback(tx)
+			return serializer.NewError(serializer.CodeDBError, "Failed to delete transfer stub", err)
 		}
 	}
 	if err := inventory.Commit(tx); err != nil {
