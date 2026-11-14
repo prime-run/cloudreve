@@ -178,9 +178,10 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 		(req.Props.EntityType != nil && *req.Props.EntityType == types.EntityTypeThumbnail) &&
 		req.ImportFrom == nil
 	if req.Props.SavePath == "" || isThumbnailAndPolicyNotAvailable {
-		req.Props.SavePath = generateSavePath(policy, req, f.user)
+		// Use the file owner (source owner for write-through transfers), not the requesting user.
+		req.Props.SavePath = generateSavePath(policy, req, owner)
 		if isThumbnailAndPolicyNotAvailable {
-			req.Props.SavePath = path.Clean(util.ReplaceMagicVar(f.settingClient.ThumbEntitySuffix(ctx), fs.Separator, true, true, time.Now(), f.user.ID, req.Props.Uri.Name(), req.Props.Uri.Path(), req.Props.SavePath))
+			req.Props.SavePath = path.Clean(util.ReplaceMagicVar(f.settingClient.ThumbEntitySuffix(ctx), fs.Separator, true, true, time.Now(), owner.ID, req.Props.Uri.Name(), req.Props.Uri.Path(), req.Props.SavePath))
 		}
 	}
 

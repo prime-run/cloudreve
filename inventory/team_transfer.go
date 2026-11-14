@@ -21,10 +21,10 @@ type TeamTransfer struct {
 	UpdatedAt    time.Time
 	DeletedAt    *time.Time
 	AllowWrite   bool
-	SourceFileID int
+	SourceFileID int // 0 when cleared after source delete / revoke
 	SourceTeamID int
 	DestTeamID   int
-	DestFileID   int
+	DestFileID   int // 0 when cleared after stub delete / revoke
 	CreatedBy    int
 
 	SourceFile *ent.File
@@ -54,8 +54,10 @@ type TeamTransferClient interface {
 	Create(ctx context.Context, args *CreateTeamTransferParams) (*TeamTransfer, error)
 	GetByID(ctx context.Context, id int) (*TeamTransfer, error)
 	GetByDestFileID(ctx context.Context, destFileID int) (*TeamTransfer, error)
+	// SoftDelete revokes a transfer and nulls FK columns so file hard-delete can proceed.
 	SoftDelete(ctx context.Context, id int) error
-	SoftDeleteByDestFileID(ctx context.Context, destFileID int) error
+	SoftDeleteByDestFileIDs(ctx context.Context, destFileIDs []int) error
+	SoftDeleteBySourceFileIDs(ctx context.Context, sourceFileIDs []int) error
 	DirectoryTeams(ctx context.Context) ([]*ent.Team, error)
 }
 
@@ -158,7 +160,9 @@ func (c *teamTransferClient) SoftDelete(ctx context.Context, id int) error {
 	now := time.Now()
 	parts := strings.Split(c.ph(3), ", ")
 	_, err := c.client.ExecContext(ctx, fmt.Sprintf(`
-UPDATE team_transfers SET deleted_at = %s, updated_at = %s WHERE id = %s AND deleted_at IS NULL
+UPDATE team_transfers
+SET deleted_at = %s, updated_at = %s, source_file_id = NULL, dest_file_id = NULL
+WHERE id = %s AND deleted_at IS NULL
 `, parts[0], parts[1], parts[2]), now, now, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete team transfer: %w", err)
@@ -166,14 +170,46 @@ UPDATE team_transfers SET deleted_at = %s, updated_at = %s WHERE id = %s AND del
 	return nil
 }
 
-func (c *teamTransferClient) SoftDeleteByDestFileID(ctx context.Context, destFileID int) error {
+func (c *teamTransferClient) SoftDeleteByDestFileIDs(ctx context.Context, destFileIDs []int) error {
+	return c.softDeleteByFileIDs(ctx, "dest_file_id", destFileIDs)
+}
+
+func (c *teamTransferClient) SoftDeleteBySourceFileIDs(ctx context.Context, sourceFileIDs []int) error {
+	return c.softDeleteByFileIDs(ctx, "source_file_id", sourceFileIDs)
+}
+
+func (c *teamTransferClient) softDeleteByFileIDs(ctx context.Context, column string, ids []int) error {
+	if len(ids) == 0 {
+		return nil
+	}
 	now := time.Now()
-	parts := strings.Split(c.ph(3), ", ")
-	_, err := c.client.ExecContext(ctx, fmt.Sprintf(`
-UPDATE team_transfers SET deleted_at = %s, updated_at = %s WHERE dest_file_id = %s AND deleted_at IS NULL
-`, parts[0], parts[1], parts[2]), now, now, destFileID)
-	if err != nil {
-		return fmt.Errorf("failed to delete team transfer by dest file: %w", err)
+	// Batch to stay under max SQL params (2 timestamps + N ids).
+	batchSize := c.maxSQlParam - 2
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	for start := 0; start < len(ids); start += batchSize {
+		end := start + batchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		ph := c.ph(2 + len(chunk))
+		parts := strings.Split(ph, ", ")
+		inList := strings.Join(parts[2:], ", ")
+		args := make([]any, 0, 2+len(chunk))
+		args = append(args, now, now)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		_, err := c.client.ExecContext(ctx, fmt.Sprintf(`
+UPDATE team_transfers
+SET deleted_at = %s, updated_at = %s, source_file_id = NULL, dest_file_id = NULL
+WHERE %s IN (%s) AND deleted_at IS NULL
+`, parts[0], parts[1], column, inList), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete team transfers by %s: %w", column, err)
+		}
 	}
 	return nil
 }
@@ -184,8 +220,14 @@ func (c *teamTransferClient) DirectoryTeams(ctx context.Context) ([]*ent.Team, e
 
 func (c *teamTransferClient) eagerLoad(ctx context.Context, t *TeamTransfer) error {
 	if _, ok := ctx.Value(LoadTeamTransferSourceFile{}).(bool); ok {
+		if t.SourceFileID == 0 {
+			return &ent.NotFoundError{}
+		}
 		f, err := c.client.File.Get(ctx, t.SourceFileID)
 		if err != nil {
+			if ent.IsNotFound(err) {
+				return err
+			}
 			return fmt.Errorf("failed to load source file: %w", err)
 		}
 		t.SourceFile = f
@@ -216,17 +258,25 @@ func (c *teamTransferClient) eagerLoad(ctx context.Context, t *TeamTransfer) err
 
 func scanTeamTransfer(rows *sql.Rows) (*TeamTransfer, error) {
 	var (
-		t         TeamTransfer
-		deletedAt sql.NullTime
+		t            TeamTransfer
+		deletedAt    sql.NullTime
+		sourceFileID sql.NullInt64
+		destFileID   sql.NullInt64
 	)
 	if err := rows.Scan(
 		&t.ID, &t.CreatedAt, &t.UpdatedAt, &deletedAt, &t.AllowWrite,
-		&t.SourceFileID, &t.SourceTeamID, &t.DestTeamID, &t.DestFileID, &t.CreatedBy,
+		&sourceFileID, &t.SourceTeamID, &t.DestTeamID, &destFileID, &t.CreatedBy,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan team transfer: %w", err)
 	}
 	if deletedAt.Valid {
 		t.DeletedAt = &deletedAt.Time
+	}
+	if sourceFileID.Valid {
+		t.SourceFileID = int(sourceFileID.Int64)
+	}
+	if destFileID.Valid {
+		t.DestFileID = int(destFileID.Int64)
 	}
 	return &t, nil
 }

@@ -754,13 +754,21 @@ func (f *DBFS) generateEncryptMetadata(ctx context.Context, uploadRequest *fs.Up
 }
 
 // getPreferredPolicy tries to get the preferred storage policy for the given file.
+// Prefer the file's own storage_policy_files when set; otherwise the owner's group policy.
 func (f *DBFS) getPreferredPolicy(ctx context.Context, file *File) (*ent.StoragePolicy, error) {
+	sc, _ := inventory.InheritTx(ctx, f.storagePolicyClient)
+	if pid := file.PolicyID(); pid > 0 {
+		policy, err := sc.GetPolicyByID(ctx, pid)
+		if err == nil {
+			return policy, nil
+		}
+	}
+
 	ownerGroup := file.Owner().Edges.Group
 	if ownerGroup == nil {
 		return nil, fmt.Errorf("owner group not loaded")
 	}
 
-	sc, _ := inventory.InheritTx(ctx, f.storagePolicyClient)
 	groupPolicy, err := sc.GetByGroup(ctx, ownerGroup)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to get available storage policies", err)
@@ -827,7 +835,7 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 		case constants.FileSystemTeam:
 			n = NewTeamNavigator(f.user, f.fileClient, f.teamClient, f.l, config, f.hasher)
 		case constants.FileSystemTeamTransfer:
-			n = NewTeamTransferNavigator(f.user, f.fileClient, f.teamClient, f.transferClient, f.l, config, f.hasher)
+			n = NewTeamTransferNavigator(f.user, f.fileClient, f.teamClient, f.transferClient, f.userClient, f.l, config, f.hasher)
 		default:
 			f.mu.Unlock()
 			return nil, fmt.Errorf("unknown file system %q", pathFs)
@@ -856,6 +864,12 @@ func (f *DBFS) getNavigator(ctx context.Context, path *fs.URI, requiredCapabilit
 	// Team capabilities depend on membership role; resolve before the capability check.
 	if tn, ok := res.(*teamNavigator); ok {
 		if _, err := tn.ensureMembership(ctx, path); err != nil {
+			return nil, err
+		}
+	}
+	// Team-transfer write caps depend on allow_write; load the row before the capability check.
+	if ttn, ok := res.(*teamTransferNavigator); ok {
+		if err := ttn.loadTransferForCaps(ctx, path); err != nil {
 			return nil, err
 		}
 	}

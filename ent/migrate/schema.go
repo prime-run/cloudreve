@@ -540,10 +540,10 @@ var (
 		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"mysql": "datetime"}},
 		{Name: "deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"mysql": "datetime"}},
 		{Name: "allow_write", Type: field.TypeBool, Default: false},
-		{Name: "source_file_id", Type: field.TypeInt},
+		{Name: "source_file_id", Type: field.TypeInt, Nullable: true},
 		{Name: "source_team_id", Type: field.TypeInt},
 		{Name: "dest_team_id", Type: field.TypeInt},
-		{Name: "dest_file_id", Type: field.TypeInt, Unique: true},
+		{Name: "dest_file_id", Type: field.TypeInt, Nullable: true, Unique: true},
 		{Name: "created_by", Type: field.TypeInt},
 	}
 	// TeamTransfersTable holds the schema information for the "team_transfers" table.
@@ -556,7 +556,7 @@ var (
 				Symbol:     "team_transfers_files_source",
 				Columns:    []*schema.Column{TeamTransfersColumns[5]},
 				RefColumns: []*schema.Column{FilesColumns[0]},
-				OnDelete:   schema.NoAction,
+				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "team_transfers_teams_source",
@@ -574,7 +574,7 @@ var (
 				Symbol:     "team_transfers_files_dest",
 				Columns:    []*schema.Column{TeamTransfersColumns[8]},
 				RefColumns: []*schema.Column{FilesColumns[0]},
-				OnDelete:   schema.NoAction,
+				OnDelete:   schema.SetNull,
 			},
 			{
 				Symbol:     "team_transfers_users_creator",

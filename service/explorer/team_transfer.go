@@ -48,7 +48,6 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 	teamClient := dep.TeamClient()
 	transferClient := dep.TeamTransferClient()
 	fileClient := dep.FileClient()
-	l := dep.Logger()
 
 	dstTeamID, err := hasher.Decode(s.DstTeamID, hashid.TeamID)
 	if err != nil {
@@ -145,66 +144,39 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create Incoming folder", err)
 	}
-	fromFolder, err := ensureChildFolder(ctx, fileClient, incoming, sanitizeFolderName(srcTeam.Name), dstTeam.Edges.Root.OwnerID)
+	fromFolderName := sanitizeFolderName(srcTeam.Name)
+	fromFolder, err := ensureChildFolder(ctx, fileClient, incoming, fromFolderName, dstTeam.Edges.Root.OwnerID)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create source Incoming subfolder", err)
 	}
 
 	results := make([]TeamTransferResponse, 0, len(items))
 	for _, item := range items {
-		stubName, err := uniqueChildName(ctx, fileClient, fromFolder, item.name, fromFolder.OwnerID)
+		fc, tx, txCtx, err := inventory.WithTx(ctx, fileClient)
 		if err != nil {
-			return nil, serializer.NewError(serializer.CodeDBError, "Failed to allocate stub name", err)
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
 		}
+		tc, _ := inventory.InheritTx(txCtx, transferClient)
 
-		meta := map[string]string{
-			dbfs.MetadataTeamTransferRedirect: fmt.Sprintf("%s://pending@%s", constants.CloudreveScheme, constants.FileSystemTeamTransfer),
+		stub, stubName, tr, err := createTransferStubInTx(txCtx, fc, tc, hasher, fromFolder, item.name, item.isDir, &inventory.CreateTeamTransferParams{
+			SourceFileID: item.fileID,
+			SourceTeamID: sourceTeamID,
+			DestTeamID:   dstTeamID,
+			CreatedBy:    user.ID,
+			AllowWrite:   s.AllowWrite,
+		}, map[string]string{
 			dbfs.MetadataTransferFromTeam:     hashid.EncodeTeamID(hasher, sourceTeamID),
 			dbfs.MetadataTransferFromTeamName: srcTeam.Name,
 			dbfs.MetadataTransferBy:           hashid.EncodeUserID(hasher, user.ID),
 			dbfs.MetadataTransferByNick:       user.Nick,
 			dbfs.MetadataTransferAllowWrite:   lo.Ternary(s.AllowWrite, "1", "0"),
-		}
-
-		var stub *ent.File
-		if item.isDir {
-			stub, err = fileClient.CreateFolder(ctx, fromFolder, &inventory.CreateFolderParameters{
-				Owner:      fromFolder.OwnerID,
-				Name:       stubName,
-				IsSymbolic: true,
-				Metadata:   meta,
-			})
-		} else {
-			stub, _, _, err = fileClient.CreateFile(ctx, fromFolder, &inventory.CreateFileParameters{
-				FileType:   types.FileTypeFile,
-				Name:       stubName,
-				IsSymbolic: true,
-				OwnerID:    fromFolder.OwnerID,
-				Metadata:   meta,
-			})
-		}
-		if err != nil {
-			return nil, serializer.NewError(serializer.CodeDBError, "Failed to create transfer stub", err)
-		}
-
-		tr, err := transferClient.Create(ctx, &inventory.CreateTeamTransferParams{
-			SourceFileID: item.fileID,
-			SourceTeamID: sourceTeamID,
-			DestTeamID:   dstTeamID,
-			DestFileID:   stub.ID,
-			CreatedBy:    user.ID,
-			AllowWrite:   s.AllowWrite,
 		})
 		if err != nil {
-			_, _, _ = fileClient.Delete(ctx, []*ent.File{stub}, nil)
-			return nil, serializer.NewError(serializer.CodeDBError, "Failed to create transfer record", err)
+			_ = inventory.Rollback(tx)
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to create transfer", err)
 		}
-
-		redirect := fmt.Sprintf("%s://%s@%s", constants.CloudreveScheme, hashid.EncodeTeamTransferID(hasher, tr.ID), constants.FileSystemTeamTransfer)
-		if err := fileClient.UpsertMetadata(ctx, stub, map[string]string{
-			dbfs.MetadataTeamTransferRedirect: redirect,
-		}, nil); err != nil {
-			l.Warning("Failed to update transfer redirect metadata: %s", err)
+		if err := inventory.Commit(tx); err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit transfer", err)
 		}
 
 		destURI := fmt.Sprintf("%s://%s@%s/%s/%s/%s",
@@ -212,7 +184,7 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 			hashid.EncodeTeamID(hasher, dstTeamID),
 			constants.FileSystemTeam,
 			incomingFolderName,
-			sanitizeFolderName(srcTeam.Name),
+			fromFolderName,
 			stubName,
 		)
 		results = append(results, TeamTransferResponse{
@@ -223,9 +195,81 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 			FromTeam:     hashid.EncodeTeamID(hasher, sourceTeamID),
 			FromTeamName: srcTeam.Name,
 		})
+		_ = stub
 	}
 
 	return results, nil
+}
+
+// createTransferStubInTx creates the stub + transfer row + final redirect in one transaction.
+func createTransferStubInTx(
+	ctx context.Context,
+	fc inventory.FileClient,
+	tc inventory.TeamTransferClient,
+	hasher hashid.Encoder,
+	parent *ent.File,
+	baseName string,
+	isDir bool,
+	params *inventory.CreateTeamTransferParams,
+	provenance map[string]string,
+) (*ent.File, string, *inventory.TeamTransfer, error) {
+	var lastErr error
+	for attempt := 0; attempt < 100; attempt++ {
+		name := baseName
+		if attempt > 0 {
+			ext := path.Ext(baseName)
+			stem := strings.TrimSuffix(baseName, ext)
+			name = fmt.Sprintf("%s (%d)%s", stem, attempt, ext)
+		}
+
+		meta := make(map[string]string, len(provenance)+1)
+		for k, v := range provenance {
+			meta[k] = v
+		}
+		// Placeholder until we know the transfer id; replaced before commit.
+		meta[dbfs.MetadataTeamTransferRedirect] = fmt.Sprintf("%s://pending@%s", constants.CloudreveScheme, constants.FileSystemTeamTransfer)
+
+		var stub *ent.File
+		var err error
+		if isDir {
+			stub, err = fc.CreateFolder(ctx, parent, &inventory.CreateFolderParameters{
+				Owner:      parent.OwnerID,
+				Name:       name,
+				IsSymbolic: true,
+				Metadata:   meta,
+			})
+		} else {
+			stub, _, _, err = fc.CreateFile(ctx, parent, &inventory.CreateFileParameters{
+				FileType:   types.FileTypeFile,
+				Name:       name,
+				IsSymbolic: true,
+				OwnerID:    parent.OwnerID,
+				Metadata:   meta,
+			})
+		}
+		if err != nil {
+			if ent.IsConstraintError(err) {
+				lastErr = err
+				continue
+			}
+			return nil, "", nil, err
+		}
+
+		params.DestFileID = stub.ID
+		tr, err := tc.Create(ctx, params)
+		if err != nil {
+			return nil, "", nil, err
+		}
+
+		redirect := fmt.Sprintf("%s://%s@%s", constants.CloudreveScheme, hashid.EncodeTeamTransferID(hasher, tr.ID), constants.FileSystemTeamTransfer)
+		if err := fc.UpsertMetadata(ctx, stub, map[string]string{
+			dbfs.MetadataTeamTransferRedirect: redirect,
+		}, nil); err != nil {
+			return nil, "", nil, err
+		}
+		return stub, name, tr, nil
+	}
+	return nil, "", nil, fmt.Errorf("could not allocate unique stub name for %q: %w", baseName, lastErr)
 }
 
 // DeleteTeamTransfer revokes a transfer by id.
@@ -265,13 +309,27 @@ func DeleteTeamTransfer(c *gin.Context) error {
 		return serializer.NewError(serializer.CodeNoPermissionErr, "No permission to revoke transfer", nil)
 	}
 
-	if err := transferClient.SoftDelete(ctx, tr.ID); err != nil {
+	fc, tx, txCtx, err := inventory.WithTx(ctx, fileClient)
+	if err != nil {
+		return serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
+	}
+	tc, _ := inventory.InheritTx(txCtx, transferClient)
+
+	destFileID := tr.DestFileID
+	if err := tc.SoftDelete(txCtx, tr.ID); err != nil {
+		_ = inventory.Rollback(tx)
 		return serializer.NewError(serializer.CodeDBError, "Failed to revoke transfer", err)
 	}
-	if stub, err := fileClient.GetByID(ctx, tr.DestFileID); err == nil {
-		if _, _, err := fileClient.Delete(ctx, []*ent.File{stub}, nil); err != nil {
-			dep.Logger().Warning("Failed to delete transfer stub %d: %s", tr.DestFileID, err)
+	if destFileID > 0 {
+		if stub, err := fc.GetByID(txCtx, destFileID); err == nil {
+			if _, _, err := fc.Delete(txCtx, []*ent.File{stub}, nil); err != nil {
+				_ = inventory.Rollback(tx)
+				return serializer.NewError(serializer.CodeDBError, "Failed to delete transfer stub", err)
+			}
 		}
+	}
+	if err := inventory.Commit(tx); err != nil {
+		return serializer.NewError(serializer.CodeDBError, "Failed to commit transfer revoke", err)
 	}
 	return nil
 }
@@ -295,25 +353,16 @@ func ensureChildFolder(ctx context.Context, fc inventory.FileClient, parent *ent
 	return created, nil
 }
 
-func uniqueChildName(ctx context.Context, fc inventory.FileClient, parent *ent.File, base string, ownerID int) (string, error) {
-	name := base
-	for i := 0; i < 100; i++ {
-		_, err := fc.GetChildFile(ctx, parent, ownerID, name, false)
-		if ent.IsNotFound(err) {
-			return name, nil
-		}
-		ext := path.Ext(base)
-		stem := strings.TrimSuffix(base, ext)
-		name = fmt.Sprintf("%s (%d)%s", stem, i+1, ext)
-	}
-	return "", fmt.Errorf("could not allocate unique name for %q", base)
-}
-
 func sanitizeFolderName(name string) string {
 	name = strings.TrimSpace(name)
-	if name == "" {
+	if name == "" || name == "." || name == ".." {
 		return "Team"
 	}
-	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_")
-	return replacer.Replace(name)
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "?", "_", "#", "_")
+	name = replacer.Replace(name)
+	name = strings.TrimSpace(name)
+	if name == "" || name == "." || name == ".." {
+		return "Team"
+	}
+	return name
 }

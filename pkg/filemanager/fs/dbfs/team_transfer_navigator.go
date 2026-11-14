@@ -23,13 +23,14 @@ var (
 
 // NewTeamTransferNavigator creates a navigator for a live team-to-team transfer.
 func NewTeamTransferNavigator(u *ent.User, fileClient inventory.FileClient, teamClient inventory.TeamClient,
-	transferClient inventory.TeamTransferClient, l logging.Logger, config *setting.DBFS, hasher hashid.Encoder) Navigator {
+	transferClient inventory.TeamTransferClient, userClient inventory.UserClient, l logging.Logger, config *setting.DBFS, hasher hashid.Encoder) Navigator {
 	n := &teamTransferNavigator{
 		user:           u,
 		l:              l,
 		fileClient:     fileClient,
 		teamClient:     teamClient,
 		transferClient: transferClient,
+		userClient:     userClient,
 		config:         config,
 	}
 	n.baseNavigator = newBaseNavigator(fileClient, defaultFilter, u, hasher, config)
@@ -43,10 +44,12 @@ type (
 		fileClient     inventory.FileClient
 		teamClient     inventory.TeamClient
 		transferClient inventory.TeamTransferClient
+		userClient     inventory.UserClient
 		config         *setting.DBFS
 		*baseNavigator
 
 		transfer       *inventory.TeamTransfer
+		sourceOwner    *ent.User
 		transferRoot   *File
 		singleFile     bool
 		disableRecycle bool
@@ -55,6 +58,7 @@ type (
 
 	teamTransferNavigatorState struct {
 		Transfer     *inventory.TeamTransfer
+		SourceOwner  *ent.User
 		TransferRoot *File
 		SingleFile   bool
 	}
@@ -65,6 +69,7 @@ func (n *teamTransferNavigator) PersistState(kv cache.Driver, key string) {
 	n.persist = func() {
 		kv.Set(key, teamTransferNavigatorState{
 			Transfer:     n.transfer,
+			SourceOwner:  n.sourceOwner,
 			TransferRoot: n.transferRoot,
 			SingleFile:   n.singleFile,
 		}, ContextHintTTL)
@@ -75,6 +80,7 @@ func (n *teamTransferNavigator) RestoreState(s State) error {
 	n.disableRecycle = true
 	if state, ok := s.(teamTransferNavigatorState); ok {
 		n.transfer = state.Transfer
+		n.sourceOwner = state.SourceOwner
 		n.transferRoot = state.TransferRoot
 		n.singleFile = state.SingleFile
 		return nil
@@ -92,7 +98,9 @@ func (n *teamTransferNavigator) Recycle() {
 	}
 }
 
-func (n *teamTransferNavigator) ensureTransfer(ctx context.Context, path *fs.URI) error {
+// loadTransferForCaps loads the transfer row (allow_write / deleted_at) and checks
+// destination membership so getNavigator can select write vs read-only caps before To().
+func (n *teamTransferNavigator) loadTransferForCaps(ctx context.Context, path *fs.URI) error {
 	if inventory.IsAnonymousUser(n.user) {
 		return ErrLoginRequired
 	}
@@ -106,22 +114,11 @@ func (n *teamTransferNavigator) ensureTransfer(ctx context.Context, path *fs.URI
 		return fs.ErrPathNotExist.WithError(fmt.Errorf("invalid transfer id"))
 	}
 
-	if n.transfer != nil && n.transfer.ID == transferID && n.transferRoot != nil {
-		// Re-validate dest membership on every use.
-		if _, err := n.teamClient.GetMembership(ctx, n.transfer.DestTeamID, n.user.ID); err != nil {
-			if ent.IsNotFound(err) {
-				return ErrPermissionDenied
-			}
-			return fmt.Errorf("failed to check destination membership: %w", err)
-		}
-		return nil
-	}
-
-	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceFile{}, true)
-	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceTeam{}, true)
+	// Always re-read allow_write / deleted_at; do not trust context-hint cache for those.
 	t, err := n.transferClient.GetByID(ctx, transferID)
 	if err != nil {
 		if ent.IsNotFound(err) {
+			n.transfer = nil
 			return fs.ErrPathNotExist.WithError(err)
 		}
 		return fmt.Errorf("failed to load team transfer: %w", err)
@@ -134,14 +131,46 @@ func (n *teamTransferNavigator) ensureTransfer(ctx context.Context, path *fs.URI
 		return fmt.Errorf("failed to check destination membership: %w", err)
 	}
 
-	if t.SourceFile == nil {
+	n.transfer = t
+	return nil
+}
+
+func (n *teamTransferNavigator) ensureTransfer(ctx context.Context, path *fs.URI) error {
+	if err := n.loadTransferForCaps(ctx, path); err != nil {
+		return err
+	}
+
+	if n.transferRoot != nil && n.transfer != nil && n.sourceOwner != nil {
+		// Root already hydrated; allow_write was refreshed above.
+		n.refreshRootCapabilities()
+		return nil
+	}
+
+	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceFile{}, true)
+	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceTeam{}, true)
+	t, err := n.transferClient.GetByID(ctx, n.transfer.ID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return fs.ErrPathNotExist.WithError(err)
+		}
+		return fmt.Errorf("failed to load team transfer: %w", err)
+	}
+	n.transfer = t
+
+	if t.SourceFileID == 0 || t.SourceFile == nil {
 		return fs.ErrPathNotExist.WithError(fmt.Errorf("source file missing"))
 	}
 	if t.SourceFile.IsSymbolic {
 		return fs.ErrPathNotExist.WithError(fmt.Errorf("source is symbolic"))
 	}
 
-	n.transfer = t
+	ownerCtx := context.WithValue(ctx, inventory.LoadUserGroup{}, true)
+	owner, err := n.userClient.GetByID(ownerCtx, t.SourceFile.OwnerID)
+	if err != nil {
+		return fs.ErrPathNotExist.WithError(fmt.Errorf("source owner missing: %w", err))
+	}
+	n.sourceOwner = owner
+
 	n.transferRoot = newFile(nil, t.SourceFile)
 	n.singleFile = t.SourceFile.Type == int(types.FileTypeFile)
 	if n.singleFile {
@@ -158,22 +187,33 @@ func (n *teamTransferNavigator) ensureTransfer(ctx context.Context, path *fs.URI
 		parent.Children[t.SourceFile.Name] = n.transferRoot
 		parent.Path[pathIndexUser] = path.Root()
 		parent.IsUserRoot = true
-		parent.OwnerModel = n.user
+		parent.OwnerModel = n.sourceOwner
 		parent.CapabilitiesBs = n.Capabilities(false).Capability
-		n.transferRoot.OwnerModel = n.user
+		n.transferRoot.OwnerModel = n.sourceOwner
 		n.transferRoot.CapabilitiesBs = parent.CapabilitiesBs
-		// Expose folder root as transferRoot for path walking when single file.
 		n.transferRoot = parent
 	} else {
 		n.transferRoot.Path[pathIndexUser] = path.Root()
 		n.transferRoot.IsUserRoot = true
-		n.transferRoot.OwnerModel = n.user
+		n.transferRoot.OwnerModel = n.sourceOwner
 		n.transferRoot.CapabilitiesBs = n.Capabilities(false).Capability
 	}
 
 	rootPath := newTeamTransferUri(hashid.EncodeTeamTransferID(n.hasher, t.ID))
 	n.transferRoot.Path[pathIndexRoot] = rootPath
 	return nil
+}
+
+func (n *teamTransferNavigator) refreshRootCapabilities() {
+	if n.transferRoot == nil {
+		return
+	}
+	caps := n.Capabilities(false).Capability
+	n.transferRoot.CapabilitiesBs = caps
+	for _, child := range n.transferRoot.Children {
+		child.CapabilitiesBs = caps
+		child.OwnerModel = n.sourceOwner
+	}
 }
 
 func (n *teamTransferNavigator) To(ctx context.Context, path *fs.URI) (*File, error) {
@@ -191,7 +231,6 @@ func (n *teamTransferNavigator) To(ctx context.Context, path *fs.URI) (*File, er
 		if len(elements) == 1 {
 			child, ok := n.transferRoot.Children[elements[0]]
 			if !ok || child.Name() != elements[0] {
-				// refresh from DB in case name changed
 				src, err := n.fileClient.GetByID(ctx, n.transfer.SourceFileID)
 				if err != nil {
 					return nil, fs.ErrPathNotExist.WithError(err)
@@ -200,7 +239,7 @@ func (n *teamTransferNavigator) To(ctx context.Context, path *fs.URI) (*File, er
 					return nil, fs.ErrPathNotExist
 				}
 				f := newFile(n.transferRoot, src)
-				f.OwnerModel = n.user
+				f.OwnerModel = n.sourceOwner
 				f.CapabilitiesBs = n.Capabilities(false).Capability
 				return f, nil
 			}
@@ -216,7 +255,7 @@ func (n *teamTransferNavigator) To(ctx context.Context, path *fs.URI) (*File, er
 		if err != nil {
 			return lastAncestor, fmt.Errorf("failed to walk into %q: %w", element, err)
 		}
-		current.OwnerModel = n.user
+		current.OwnerModel = n.sourceOwner
 		current.CapabilitiesBs = n.Capabilities(false).Capability
 	}
 	return current, nil
@@ -229,7 +268,7 @@ func (n *teamTransferNavigator) Children(ctx context.Context, parent *File, args
 			return nil, err
 		}
 		f := newFile(parent, src)
-		f.OwnerModel = n.user
+		f.OwnerModel = n.sourceOwner
 		f.CapabilitiesBs = n.Capabilities(false).Capability
 		return &ListResult{
 			Files:          []*File{f},
@@ -274,17 +313,23 @@ func (n *teamTransferNavigator) FollowTx(ctx context.Context) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	newUserClient, _, _, err := inventory.WithTx(ctx, n.userClient)
+	if err != nil {
+		return nil, err
+	}
 
-	oldFile, oldTeam, oldTransfer := n.fileClient, n.teamClient, n.transferClient
+	oldFile, oldTeam, oldTransfer, oldUser := n.fileClient, n.teamClient, n.transferClient, n.userClient
 	revert := func() {
 		n.fileClient = oldFile
 		n.teamClient = oldTeam
 		n.transferClient = oldTransfer
+		n.userClient = oldUser
 		n.baseNavigator.fileClient = oldFile
 	}
 	n.fileClient = newFileClient
 	n.teamClient = newTeamClient
 	n.transferClient = newTransferClient
+	n.userClient = newUserClient
 	n.baseNavigator.fileClient = newFileClient
 	return revert, nil
 }

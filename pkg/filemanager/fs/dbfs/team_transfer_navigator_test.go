@@ -74,3 +74,19 @@ func TestTeamTransferNavigatorNilTransferIsReadonly(t *testing.T) {
 		t.Fatal("nil transfer should still allow download")
 	}
 }
+
+func TestTeamTransferNavigatorColdCapsBeforeHydration(t *testing.T) {
+	// Simulates getNavigator after loadTransferForCaps with allow_write false:
+	// transfer row is present, root not yet hydrated.
+	n := &teamTransferNavigator{
+		config:   &setting.DBFS{MaxPageSize: 100},
+		transfer: &inventory.TeamTransfer{AllowWrite: false},
+	}
+	if n.Capabilities(false).Capability.Enabled(int(NavigatorCapabilityUploadFile)) {
+		t.Fatal("cold readonly transfer must reject upload before To()")
+	}
+	n.transfer.AllowWrite = true
+	if !n.Capabilities(false).Capability.Enabled(int(NavigatorCapabilityUploadFile)) {
+		t.Fatal("cold write transfer must allow upload after allow_write load")
+	}
+}

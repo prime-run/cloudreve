@@ -23,3 +23,22 @@ func TestCanSendAsRole(t *testing.T) {
 		t.Fatal("viewers must not be allowed to send")
 	}
 }
+
+func TestSanitizeFolderName(t *testing.T) {
+	cases := map[string]string{
+		"":           "Team",
+		".":          "Team",
+		"..":         "Team",
+		"  ":         "Team",
+		"A/B":        "A_B",
+		`A\B`:        "A_B",
+		"A:B":        "A_B",
+		"A?B#C":      "A_B_C",
+		" Engineering ": "Engineering",
+	}
+	for in, want := range cases {
+		if got := sanitizeFolderName(in); got != want {
+			t.Fatalf("sanitizeFolderName(%q)=%q want %q", in, got, want)
+		}
+	}
+}
