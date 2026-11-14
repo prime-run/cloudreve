@@ -69,6 +69,9 @@ func (File) Edges() []ent.Edge {
 		edge.To("entities", Entity.Type),
 		edge.To("shares", Share.Type),
 		edge.To("direct_links", DirectLink.Type),
+		edge.To("outgoing_team_transfers", TeamTransfer.Type),
+		edge.To("incoming_team_transfer", TeamTransfer.Type).
+			Unique(),
 	}
 }
 

@@ -300,6 +300,26 @@ func MoveFile(c *gin.Context) {
 }
 
 // Delete 删除文件或目录
+// CreateTeamTransfer sends team files to another team as live links.
+func CreateTeamTransfer(c *gin.Context) {
+	service := ParametersFromContext[*explorer.CreateTeamTransferService](c, explorer.TeamTransferCreateParamCtx{})
+	res, err := service.Create(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+// DeleteTeamTransfer revokes a team transfer.
+func DeleteTeamTransfer(c *gin.Context) {
+	if err := explorer.DeleteTeamTransfer(c); err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{})
+}
+
 func Delete(c *gin.Context) {
 	service := ParametersFromContext[*explorer.DeleteFileService](c, explorer.DeleteFileParameterCtx{})
 	err := service.Delete(c)

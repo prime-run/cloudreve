@@ -65,6 +65,12 @@ const (
 	MetadataRestoreUri          = MetadataSysPrefix + "restore_uri"
 	MetadataExpectedCollectTime = MetadataSysPrefix + "expected_collect_time"
 	MetadataSharedOwner         = MetadataSysPrefix + "shared_owner"
+	MetadataTeamTransferRedirect = MetadataSysPrefix + "team_transfer_redirect"
+	MetadataTransferFromTeam     = MetadataSysPrefix + "transfer_from_team"
+	MetadataTransferFromTeamName = MetadataSysPrefix + "transfer_from_team_name"
+	MetadataTransferBy           = MetadataSysPrefix + "transfer_by"
+	MetadataTransferByNick       = MetadataSysPrefix + "transfer_by_nick"
+	MetadataTransferAllowWrite   = MetadataSysPrefix + "transfer_allow_write"
 
 	ThumbMetadataPrefix = "thumb:"
 	ThumbDisabledKey    = ThumbMetadataPrefix + "disabled"

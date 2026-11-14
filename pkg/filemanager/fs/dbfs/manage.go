@@ -408,6 +408,16 @@ func (f *DBFS) Delete(ctx context.Context, path []*fs.URI, opts ...fs.Option) ([
 		return nil, nil, err
 	}
 
+	// Revoke live team transfers when their destination stubs are deleted.
+	for _, target := range targets {
+		if !target.IsSymbolic() {
+			continue
+		}
+		if err := f.transferClient.SoftDeleteByDestFileID(ctx, target.ID()); err != nil {
+			f.l.Warning("Failed to revoke team transfer for stub %d: %s", target.ID(), err)
+		}
+	}
+
 	fc, tx, ctx, err := inventory.WithTx(ctx, f.fileClient)
 	if err != nil {
 		return nil, nil, serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)

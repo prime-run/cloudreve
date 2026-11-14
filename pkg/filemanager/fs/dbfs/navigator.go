@@ -169,6 +169,28 @@ func init() {
 		NavigatorCapabilityInfo:          true,
 		NavigatorCapabilityGenerateThumb: true,
 	}, teamViewerNavigatorCapability)
+	boolset.Sets(map[NavigatorCapability]bool{
+		NavigatorCapabilityListChildren:  true,
+		NavigatorCapabilityDownloadFile:  true,
+		NavigatorCapabilityEnterFolder:   true,
+		NavigatorCapabilityInfo:          true,
+		NavigatorCapabilityGenerateThumb: true,
+	}, teamTransferNavigatorCapability)
+	boolset.Sets(map[NavigatorCapability]bool{
+		NavigatorCapabilityCreateFile:     true,
+		NavigatorCapabilityRenameFile:     true,
+		NavigatorCapabilityUploadFile:     true,
+		NavigatorCapabilityDownloadFile:   true,
+		NavigatorCapabilityUpdateMetadata: true,
+		NavigatorCapabilityListChildren:   true,
+		NavigatorCapabilityGenerateThumb:  true,
+		NavigatorCapabilityDeleteFile:     true,
+		NavigatorCapabilityLockFile:       true,
+		NavigatorCapabilityInfo:           true,
+		NavigatorCapabilityVersionControl: true,
+		NavigatorCapabilityEnterFolder:    true,
+		NavigatorCapabilityModifyProps:    true,
+	}, teamTransferWriteNavigatorCapability)
 }
 
 // ==================== Base Navigator ====================

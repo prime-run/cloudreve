@@ -18,6 +18,28 @@ type UserTeamResponse struct {
 	TeamID int    `json:"team_id,omitempty"`
 }
 
+// TeamDirectoryEntry is a lightweight team listing for transfer destination pickers.
+type TeamDirectoryEntry struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Directory lists all teams on the site (for send-to-team picker).
+func Directory(c *gin.Context) ([]TeamDirectoryEntry, error) {
+	dep := dependency.FromContext(c)
+	hasher := dep.HashIDEncoder()
+	teams, err := dep.TeamTransferClient().DirectoryTeams(c)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to list teams", err)
+	}
+	return lo.Map(teams, func(t *ent.Team, _ int) TeamDirectoryEntry {
+		return TeamDirectoryEntry{
+			ID:   hashid.EncodeTeamID(hasher, t.ID),
+			Name: t.Name,
+		}
+	}), nil
+}
+
 // List returns teams the current user belongs to.
 func List(c *gin.Context) ([]UserTeamResponse, error) {
 	dep := dependency.FromContext(c)

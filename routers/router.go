@@ -619,6 +619,16 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 				controllers.FromJSON[explorer.MoveFileService](explorer.MoveFileParameterCtx{}),
 				middleware.ValidateBatchFileCount(dep, explorer.MoveFileParameterCtx{}),
 				controllers.MoveFile)
+			// Send team files to another team as live links
+			file.POST("teamTransfer",
+				middleware.RequiredScopes(types.ScopeFilesWrite),
+				controllers.FromJSON[explorer.CreateTeamTransferService](explorer.TeamTransferCreateParamCtx{}),
+				controllers.CreateTeamTransfer,
+			)
+			file.DELETE("teamTransfer/:id",
+				middleware.RequiredScopes(types.ScopeFilesWrite),
+				controllers.DeleteTeamTransfer,
+			)
 			// Get URL of the file for preview/download
 			file.POST("url",
 				middleware.ContextHint(),
@@ -1273,6 +1283,11 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 			auth.GET("team",
 				middleware.RequiredScopes(types.ScopeFilesRead),
 				controllers.ListTeams,
+			)
+			// Site-wide team directory (send-to-team picker)
+			auth.GET("team/directory",
+				middleware.RequiredScopes(types.ScopeFilesRead),
+				controllers.TeamDirectory,
 			)
 
 			// 用户

@@ -533,6 +533,76 @@ var (
 			},
 		},
 	}
+	// TeamTransfersColumns holds the columns for the "team_transfers" table.
+	TeamTransfersColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"mysql": "datetime"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"mysql": "datetime"}},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"mysql": "datetime"}},
+		{Name: "allow_write", Type: field.TypeBool, Default: false},
+		{Name: "source_file_id", Type: field.TypeInt},
+		{Name: "source_team_id", Type: field.TypeInt},
+		{Name: "dest_team_id", Type: field.TypeInt},
+		{Name: "dest_file_id", Type: field.TypeInt, Unique: true},
+		{Name: "created_by", Type: field.TypeInt},
+	}
+	// TeamTransfersTable holds the schema information for the "team_transfers" table.
+	TeamTransfersTable = &schema.Table{
+		Name:       "team_transfers",
+		Columns:    TeamTransfersColumns,
+		PrimaryKey: []*schema.Column{TeamTransfersColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "team_transfers_files_source",
+				Columns:    []*schema.Column{TeamTransfersColumns[5]},
+				RefColumns: []*schema.Column{FilesColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "team_transfers_teams_source",
+				Columns:    []*schema.Column{TeamTransfersColumns[6]},
+				RefColumns: []*schema.Column{TeamsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "team_transfers_teams_dest",
+				Columns:    []*schema.Column{TeamTransfersColumns[7]},
+				RefColumns: []*schema.Column{TeamsColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "team_transfers_files_dest",
+				Columns:    []*schema.Column{TeamTransfersColumns[8]},
+				RefColumns: []*schema.Column{FilesColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+			{
+				Symbol:     "team_transfers_users_creator",
+				Columns:    []*schema.Column{TeamTransfersColumns[9]},
+				RefColumns: []*schema.Column{UsersColumns[0]},
+				OnDelete:   schema.NoAction,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "teamtransfer_dest_file_id",
+				Unique:  true,
+				Columns: []*schema.Column{TeamTransfersColumns[8]},
+			},
+			{
+				Name:    "teamtransfer_dest_team_id",
+				Columns: []*schema.Column{TeamTransfersColumns[7]},
+			},
+			{
+				Name:    "teamtransfer_source_file_id",
+				Columns: []*schema.Column{TeamTransfersColumns[5]},
+			},
+			{
+				Name:    "teamtransfer_source_team_id",
+				Columns: []*schema.Column{TeamTransfersColumns[6]},
+			},
+		},
+	}
 	// UsersColumns holds the columns for the "users" table.
 	UsersColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
@@ -607,6 +677,7 @@ var (
 		TasksTable,
 		TeamsTable,
 		TeamMembersTable,
+		TeamTransfersTable,
 		UsersTable,
 		FileEntitiesTable,
 	}
@@ -633,6 +704,11 @@ func init() {
 	TeamsTable.ForeignKeys[0].RefTable = FilesTable
 	TeamMembersTable.ForeignKeys[0].RefTable = TeamsTable
 	TeamMembersTable.ForeignKeys[1].RefTable = UsersTable
+	TeamTransfersTable.ForeignKeys[0].RefTable = FilesTable
+	TeamTransfersTable.ForeignKeys[1].RefTable = TeamsTable
+	TeamTransfersTable.ForeignKeys[2].RefTable = TeamsTable
+	TeamTransfersTable.ForeignKeys[3].RefTable = FilesTable
+	TeamTransfersTable.ForeignKeys[4].RefTable = UsersTable
 	UsersTable.ForeignKeys[0].RefTable = GroupsTable
 	FileEntitiesTable.ForeignKeys[0].RefTable = FilesTable
 	FileEntitiesTable.ForeignKeys[1].RefTable = EntitiesTable
