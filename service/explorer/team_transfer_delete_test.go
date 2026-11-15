@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS team_transfers (
   source_team_id INTEGER NOT NULL,
   dest_team_id INTEGER NOT NULL,
   dest_file_id INTEGER,
-  created_by INTEGER NOT NULL
+  created_by INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'
 )`)
 	require.NoError(t, err)
 	return client
@@ -73,8 +74,8 @@ func seedSymbolicStub(t *testing.T, client *ent.Client) (parent *ent.File, stub 
 	require.NoError(t, err)
 	res, err := client.ExecContext(ctx, `
 INSERT INTO team_transfers
-  (created_at, updated_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by)
-VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, ?, ?, ?, ?, ?)`,
+  (created_at, updated_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by, status)
+VALUES (CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, ?, ?, ?, ?, ?, 'active')`,
 		parent.ID, srcTeam.ID, dstTeam.ID, stub.ID, user.ID)
 	require.NoError(t, err)
 	id, err := res.LastInsertId()
@@ -374,9 +375,7 @@ func TestCreateFileStubRollsBackUniqueInsideSavepoint(t *testing.T) {
 	ctx := context.Background()
 	client := openTransferTestDB(t)
 	parent, existing, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
-	policy, err := client.StoragePolicy.Create().SetName("local").SetType("local").Save(ctx)
-	require.NoError(t, err)
-	parent.StoragePolicyFiles = policy.ID
+	require.Zero(t, parent.StoragePolicyFiles)
 
 	hasher, err := hashid.New("test-salt")
 	require.NoError(t, err)
@@ -404,6 +403,18 @@ func TestCreateFileStubRollsBackUniqueInsideSavepoint(t *testing.T) {
 	require.Equal(t, "doc.txt", got.Name)
 	assertNoTransferRedirect(t, client, existing.ID)
 	assertTransferRedirect(t, client, stub.ID)
+	assertNullStoragePolicy(t, client, stub.ID)
+}
+
+func assertNullStoragePolicy(t *testing.T, client *ent.Client, fileID int) {
+	t.Helper()
+	rows, err := client.QueryContext(context.Background(), `SELECT storage_policy_files FROM files WHERE id = ?`, fileID)
+	require.NoError(t, err)
+	defer rows.Close()
+	require.True(t, rows.Next())
+	var policy sql.NullInt64
+	require.NoError(t, rows.Scan(&policy))
+	require.False(t, policy.Valid)
 }
 
 func scanTransferRow(t *testing.T, client *ent.Client, id int) (sql.NullString, sql.NullInt64, sql.NullInt64) {
@@ -416,4 +427,148 @@ func scanTransferRow(t *testing.T, client *ent.Client, id int) (sql.NullString, 
 	var sourceID, destID sql.NullInt64
 	require.NoError(t, rows.Scan(&deleted, &sourceID, &destID))
 	return deleted, sourceID, destID
+}
+
+func TestPendingTransferHasNoDestStub(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	srcFile, err := client.File.Create().
+		SetType(int(types.FileTypeFile)).
+		SetName("report.pdf").
+		SetOwnerID(parent.OwnerID).
+		SetParent(parent).
+		Save(ctx)
+	require.NoError(t, err)
+
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+	before, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+
+	tr, err := tc.Create(ctx, &inventory.CreateTeamTransferParams{
+		SourceFileID: srcFile.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+		AllowWrite:   false,
+		Status:       inventory.TeamTransferStatusPending,
+	})
+	require.NoError(t, err)
+	require.Equal(t, inventory.TeamTransferStatusPending, tr.Status)
+	require.Zero(t, tr.DestFileID)
+
+	after, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+
+	pending, err := tc.ListPendingBySourceTeam(ctx, srcTeamID)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, tr.ID, pending[0].ID)
+}
+
+func TestConfirmPendingTransferCreatesStub(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	srcFile, err := client.File.Create().
+		SetType(int(types.FileTypeFile)).
+		SetName("report.pdf").
+		SetOwnerID(parent.OwnerID).
+		SetParent(parent).
+		Save(ctx)
+	require.NoError(t, err)
+
+	dstTeam, err := client.Team.Get(ctx, dstTeamID)
+	require.NoError(t, err)
+	dstRoot, err := client.File.Get(ctx, dstTeam.RootFileID)
+	require.NoError(t, err)
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+
+	tr, err := tc.Create(ctx, &inventory.CreateTeamTransferParams{
+		SourceFileID: srcFile.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+		AllowWrite:   true,
+		Status:       inventory.TeamTransferStatusPending,
+	})
+	require.NoError(t, err)
+
+	incoming, err := ensureChildFolder(ctx, fc, dstRoot, incomingFolderName, dstRoot.OwnerID)
+	require.NoError(t, err)
+	fromFolder, err := ensureChildFolder(ctx, fc, incoming, "src", dstRoot.OwnerID)
+	require.NoError(t, err)
+
+	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
+	require.NoError(t, err)
+	tcTx, _ := inventory.InheritTx(txCtx, tc)
+
+	stub, name, err := createStubForPendingTransferInTx(txCtx, fcTx, tcTx, hasher, fromFolder, "report.pdf", false, tr, map[string]string{
+		"sys:transfer_from_team_name": "src",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "report.pdf", name)
+	require.NoError(t, inventory.Commit(tx))
+
+	got, err := tc.GetByID(ctx, tr.ID)
+	require.NoError(t, err)
+	require.Equal(t, inventory.TeamTransferStatusActive, got.Status)
+	require.Equal(t, stub.ID, got.DestFileID)
+	require.True(t, stub.IsSymbolic)
+	assertTransferRedirect(t, client, stub.ID)
+
+	// Second confirm must not create another stub.
+	before, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+	ok, err := tc.Activate(ctx, tr.ID, stub.ID+999)
+	require.NoError(t, err)
+	require.False(t, ok)
+	after, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+	got2, err := tc.GetByID(ctx, tr.ID)
+	require.NoError(t, err)
+	require.Equal(t, stub.ID, got2.DestFileID)
+}
+
+func TestOwnerAdminSendCreatesActiveStub(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
+	require.NoError(t, err)
+	tcTx, _ := inventory.InheritTx(txCtx, tc)
+
+	stub, name, tr, err := createTransferStubInTx(txCtx, fcTx, tcTx, hasher, parent, "live.txt", false, &inventory.CreateTeamTransferParams{
+		SourceFileID: parent.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+		Status:       inventory.TeamTransferStatusActive,
+	}, map[string]string{"sys:transfer_from_team_name": "A"})
+	require.NoError(t, err)
+	require.Equal(t, "live.txt", name)
+	require.NoError(t, inventory.Commit(tx))
+	require.Equal(t, inventory.TeamTransferStatusActive, tr.Status)
+	require.Equal(t, stub.ID, tr.DestFileID)
+	assertTransferRedirect(t, client, stub.ID)
+}
+
+func TestSourceApproverRoles(t *testing.T) {
+	if !isSourceApproverRole("owner") || !isSourceApproverRole("admin") {
+		t.Fatal("owner and admin must approve")
+	}
+	if isSourceApproverRole("member") || isSourceApproverRole("viewer") {
+		t.Fatal("member and viewer must not approve")
+	}
 }

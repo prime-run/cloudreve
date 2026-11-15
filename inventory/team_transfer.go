@@ -12,6 +12,11 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/pkg/conf"
 )
 
+const (
+	TeamTransferStatusPending = "pending"
+	TeamTransferStatusActive  = "active"
+)
+
 // TeamTransfer is a live link of a source team file into a destination team.
 // Stored via migrate schema; CRUD uses database/sql through the ent client
 // (ent codegen for this entity is not available on the current toolchain).
@@ -24,8 +29,9 @@ type TeamTransfer struct {
 	SourceFileID int // 0 when cleared after source delete / revoke
 	SourceTeamID int
 	DestTeamID   int
-	DestFileID   int // 0 when cleared after stub delete / revoke
+	DestFileID   int // 0 when cleared after stub delete / revoke, or while pending
 	CreatedBy    int
+	Status       string
 
 	SourceFile *ent.File
 	SourceTeam *ent.Team
@@ -44,9 +50,10 @@ type CreateTeamTransferParams struct {
 	SourceFileID int
 	SourceTeamID int
 	DestTeamID   int
-	DestFileID   int
+	DestFileID   int // 0 for pending (no destination stub yet)
 	CreatedBy    int
 	AllowWrite   bool
+	Status       string // pending or active; empty defaults to active when DestFileID > 0, else pending
 }
 
 type TeamTransferClient interface {
@@ -54,6 +61,10 @@ type TeamTransferClient interface {
 	Create(ctx context.Context, args *CreateTeamTransferParams) (*TeamTransfer, error)
 	GetByID(ctx context.Context, id int) (*TeamTransfer, error)
 	GetByDestFileID(ctx context.Context, destFileID int) (*TeamTransfer, error)
+	ListPendingBySourceTeam(ctx context.Context, sourceTeamID int) ([]*TeamTransfer, error)
+	// Activate sets dest_file_id and status=active only if the row is still pending.
+	// Returns false when the row was not pending (already confirmed or missing).
+	Activate(ctx context.Context, id, destFileID int) (bool, error)
 	// SoftDelete revokes a transfer and nulls FK columns so file hard-delete can proceed.
 	SoftDelete(ctx context.Context, id int) error
 	SoftDeleteByDestFileIDs(ctx context.Context, destFileIDs []int) error
@@ -96,25 +107,68 @@ func (c *teamTransferClient) ph(n int) string {
 
 func (c *teamTransferClient) Create(ctx context.Context, args *CreateTeamTransferParams) (*TeamTransfer, error) {
 	now := time.Now()
-	ph := c.ph(8)
-	_, err := c.client.ExecContext(ctx, fmt.Sprintf(`
-INSERT INTO team_transfers
-  (created_at, updated_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by)
-VALUES (%s)
-`, ph), now, now, args.AllowWrite, args.SourceFileID, args.SourceTeamID, args.DestTeamID, args.DestFileID, args.CreatedBy)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create team transfer: %w", err)
+	status := args.Status
+	if status == "" {
+		if args.DestFileID > 0 {
+			status = TeamTransferStatusActive
+		} else {
+			status = TeamTransferStatusPending
+		}
 	}
-	return c.GetByDestFileID(ctx, args.DestFileID)
+	var destFileID any
+	if args.DestFileID > 0 {
+		destFileID = args.DestFileID
+	} else {
+		destFileID = nil
+	}
+
+	ph := c.ph(9)
+	var id int64
+	if c.dbType == conf.PostgresDB {
+		rows, err := c.client.QueryContext(ctx, fmt.Sprintf(`
+INSERT INTO team_transfers
+  (created_at, updated_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by, status)
+VALUES (%s)
+RETURNING id
+`, ph), now, now, args.AllowWrite, args.SourceFileID, args.SourceTeamID, args.DestTeamID, destFileID, args.CreatedBy, status)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create team transfer: %w", err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return nil, fmt.Errorf("failed to create team transfer: no id returned")
+		}
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to create team transfer: %w", err)
+		}
+	} else {
+		res, err := c.client.ExecContext(ctx, fmt.Sprintf(`
+INSERT INTO team_transfers
+  (created_at, updated_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by, status)
+VALUES (%s)
+`, ph), now, now, args.AllowWrite, args.SourceFileID, args.SourceTeamID, args.DestTeamID, destFileID, args.CreatedBy, status)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create team transfer: %w", err)
+		}
+		id, err = res.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get team transfer id: %w", err)
+		}
+	}
+	return c.GetByID(ctx, int(id))
+}
+
+func teamTransferSelectCols() string {
+	return `id, created_at, updated_at, deleted_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by, status`
 }
 
 func (c *teamTransferClient) GetByID(ctx context.Context, id int) (*TeamTransfer, error) {
 	ph := c.ph(1)
 	rows, err := c.client.QueryContext(ctx, fmt.Sprintf(`
-SELECT id, created_at, updated_at, deleted_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by
+SELECT %s
 FROM team_transfers
 WHERE id = %s AND deleted_at IS NULL
-`, ph), id)
+`, teamTransferSelectCols(), ph), id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get team transfer: %w", err)
 	}
@@ -135,10 +189,10 @@ WHERE id = %s AND deleted_at IS NULL
 func (c *teamTransferClient) GetByDestFileID(ctx context.Context, destFileID int) (*TeamTransfer, error) {
 	ph := c.ph(1)
 	rows, err := c.client.QueryContext(ctx, fmt.Sprintf(`
-SELECT id, created_at, updated_at, deleted_at, allow_write, source_file_id, source_team_id, dest_team_id, dest_file_id, created_by
+SELECT %s
 FROM team_transfers
 WHERE dest_file_id = %s AND deleted_at IS NULL
-`, ph), destFileID)
+`, teamTransferSelectCols(), ph), destFileID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get team transfer by dest file: %w", err)
 	}
@@ -154,6 +208,58 @@ WHERE dest_file_id = %s AND deleted_at IS NULL
 		return nil, err
 	}
 	return t, rows.Err()
+}
+
+func (c *teamTransferClient) ListPendingBySourceTeam(ctx context.Context, sourceTeamID int) ([]*TeamTransfer, error) {
+	ph := c.ph(2)
+	parts := strings.Split(ph, ", ")
+	rows, err := c.client.QueryContext(ctx, fmt.Sprintf(`
+SELECT %s
+FROM team_transfers
+WHERE source_team_id = %s AND status = %s AND deleted_at IS NULL
+ORDER BY created_at ASC
+`, teamTransferSelectCols(), parts[0], parts[1]), sourceTeamID, TeamTransferStatusPending)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pending team transfers: %w", err)
+	}
+	defer rows.Close()
+	out := make([]*TeamTransfer, 0)
+	for rows.Next() {
+		t, err := scanTeamTransfer(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, t := range out {
+		if err := c.eagerLoad(ctx, t); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (c *teamTransferClient) Activate(ctx context.Context, id, destFileID int) (bool, error) {
+	now := time.Now()
+	ph := c.ph(5)
+	parts := strings.Split(ph, ", ")
+	res, err := c.client.ExecContext(ctx, fmt.Sprintf(`
+UPDATE team_transfers
+SET dest_file_id = %s, status = %s, updated_at = %s
+WHERE id = %s AND status = %s AND deleted_at IS NULL
+`, parts[0], parts[1], parts[2], parts[3], parts[4]),
+		destFileID, TeamTransferStatusActive, now, id, TeamTransferStatusPending)
+	if err != nil {
+		return false, fmt.Errorf("failed to activate team transfer: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to read activate rows: %w", err)
+	}
+	return n > 0, nil
 }
 
 func (c *teamTransferClient) SoftDelete(ctx context.Context, id int) error {
@@ -265,7 +371,7 @@ func scanTeamTransfer(rows *sql.Rows) (*TeamTransfer, error) {
 	)
 	if err := rows.Scan(
 		&t.ID, &t.CreatedAt, &t.UpdatedAt, &deletedAt, &t.AllowWrite,
-		&sourceFileID, &t.SourceTeamID, &t.DestTeamID, &destFileID, &t.CreatedBy,
+		&sourceFileID, &t.SourceTeamID, &t.DestTeamID, &destFileID, &t.CreatedBy, &t.Status,
 	); err != nil {
 		return nil, fmt.Errorf("failed to scan team transfer: %w", err)
 	}
@@ -277,6 +383,9 @@ func scanTeamTransfer(rows *sql.Rows) (*TeamTransfer, error) {
 	}
 	if destFileID.Valid {
 		t.DestFileID = int(destFileID.Int64)
+	}
+	if t.Status == "" {
+		t.Status = TeamTransferStatusActive
 	}
 	return &t, nil
 }

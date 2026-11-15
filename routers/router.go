@@ -625,6 +625,14 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 				controllers.FromJSON[explorer.CreateTeamTransferService](explorer.TeamTransferCreateParamCtx{}),
 				controllers.CreateTeamTransfer,
 			)
+			file.GET("teamTransfer",
+				middleware.RequiredScopes(types.ScopeFilesRead),
+				controllers.ListPendingTeamTransfers,
+			)
+			file.POST("teamTransfer/:id/confirm",
+				middleware.RequiredScopes(types.ScopeFilesWrite),
+				controllers.ConfirmTeamTransfer,
+			)
 			file.DELETE("teamTransfer/:id",
 				middleware.RequiredScopes(types.ScopeFilesWrite),
 				controllers.DeleteTeamTransfer,

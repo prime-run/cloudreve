@@ -123,6 +123,10 @@ func (n *teamTransferNavigator) loadTransferForCaps(ctx context.Context, path *f
 		}
 		return fmt.Errorf("failed to load team transfer: %w", err)
 	}
+	if t.Status != inventory.TeamTransferStatusActive {
+		n.transfer = nil
+		return fs.ErrPathNotExist.WithError(fmt.Errorf("transfer is not active"))
+	}
 
 	if _, err := n.teamClient.GetMembership(ctx, t.DestTeamID, n.user.ID); err != nil {
 		if ent.IsNotFound(err) {

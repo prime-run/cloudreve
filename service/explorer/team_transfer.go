@@ -32,15 +32,44 @@ type (
 	}
 	TeamTransferResponse struct {
 		ID           string `json:"id"`
-		DestPath     string `json:"dest_path"`
+		DestPath     string `json:"dest_path,omitempty"`
 		SourceURI    string `json:"source_uri"`
 		AllowWrite   bool   `json:"allow_write"`
 		FromTeam     string `json:"from_team"`
 		FromTeamName string `json:"from_team_name"`
+		Status       string `json:"status"`
+	}
+	PendingTeamTransferItem struct {
+		ID             string `json:"id"`
+		SourceFileName string `json:"source_file_name"`
+		DestTeamID     string `json:"dest_team_id"`
+		DestTeamName   string `json:"dest_team_name"`
+		CreatedByNick  string `json:"created_by_nick"`
+		AllowWrite     bool   `json:"allow_write"`
+		CreatedAt      int64  `json:"created_at"`
 	}
 )
 
-// Create creates live team-to-team transfer stubs under Incoming/{SourceTeam}/.
+func isSourceWriteRole(role teammember.Role) bool {
+	switch role {
+	case teammember.RoleOwner, teammember.RoleAdmin, teammember.RoleMember:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSourceApproverRole(role teammember.Role) bool {
+	switch role {
+	case teammember.RoleOwner, teammember.RoleAdmin:
+		return true
+	default:
+		return false
+	}
+}
+
+// Create creates live team-to-team transfer stubs under Incoming/{SourceTeam}/,
+// or a pending row when a member sends (owner/admin must confirm).
 func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferResponse, error) {
 	dep := dependency.FromContext(c)
 	user := inventory.UserFromContext(c)
@@ -99,11 +128,10 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 		}
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to check membership", err)
 	}
-	switch membership.Role {
-	case teammember.RoleOwner, teammember.RoleAdmin, teammember.RoleMember:
-	default:
+	if !isSourceWriteRole(membership.Role) {
 		return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Viewers cannot send files to other teams", nil)
 	}
+	immediate := isSourceApproverRole(membership.Role)
 
 	srcTeam, err := teamClient.GetByID(ctx, sourceTeamID)
 	if err != nil {
@@ -140,6 +168,34 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 		})
 	}
 
+	fromTeam := hashid.EncodeTeamID(hasher, sourceTeamID)
+	results := make([]TeamTransferResponse, 0, len(items))
+
+	if !immediate {
+		for _, item := range items {
+			tr, err := transferClient.Create(ctx, &inventory.CreateTeamTransferParams{
+				SourceFileID: item.fileID,
+				SourceTeamID: sourceTeamID,
+				DestTeamID:   dstTeamID,
+				CreatedBy:    user.ID,
+				AllowWrite:   s.AllowWrite,
+				Status:       inventory.TeamTransferStatusPending,
+			})
+			if err != nil {
+				return nil, serializer.NewError(serializer.CodeDBError, "Failed to create transfer", err)
+			}
+			results = append(results, TeamTransferResponse{
+				ID:           hashid.EncodeTeamTransferID(hasher, tr.ID),
+				SourceURI:    item.uri.String(),
+				AllowWrite:   s.AllowWrite,
+				FromTeam:     fromTeam,
+				FromTeamName: srcTeam.Name,
+				Status:       inventory.TeamTransferStatusPending,
+			})
+		}
+		return results, nil
+	}
+
 	incoming, err := ensureChildFolder(ctx, fileClient, dstTeam.Edges.Root, incomingFolderName, dstTeam.Edges.Root.OwnerID)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create Incoming folder", err)
@@ -150,7 +206,6 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create source Incoming subfolder", err)
 	}
 
-	results := make([]TeamTransferResponse, 0, len(items))
 	for _, item := range items {
 		fc, tx, txCtx, err := inventory.WithTx(ctx, fileClient)
 		if err != nil {
@@ -164,8 +219,9 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 			DestTeamID:   dstTeamID,
 			CreatedBy:    user.ID,
 			AllowWrite:   s.AllowWrite,
+			Status:       inventory.TeamTransferStatusActive,
 		}, map[string]string{
-			dbfs.MetadataTransferFromTeam:     hashid.EncodeTeamID(hasher, sourceTeamID),
+			dbfs.MetadataTransferFromTeam:     fromTeam,
 			dbfs.MetadataTransferFromTeamName: srcTeam.Name,
 			dbfs.MetadataTransferBy:           hashid.EncodeUserID(hasher, user.ID),
 			dbfs.MetadataTransferByNick:       user.Nick,
@@ -192,13 +248,292 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 			DestPath:     destURI,
 			SourceURI:    item.uri.String(),
 			AllowWrite:   s.AllowWrite,
-			FromTeam:     hashid.EncodeTeamID(hasher, sourceTeamID),
+			FromTeam:     fromTeam,
 			FromTeamName: srcTeam.Name,
+			Status:       inventory.TeamTransferStatusActive,
 		})
 		_ = stub
 	}
 
 	return results, nil
+}
+
+// ListPendingTeamTransfers returns pending outgoing sends for a source team.
+func ListPendingTeamTransfers(c *gin.Context) ([]PendingTeamTransferItem, error) {
+	dep := dependency.FromContext(c)
+	user := inventory.UserFromContext(c)
+	hasher := dep.HashIDEncoder()
+	teamClient := dep.TeamClient()
+	transferClient := dep.TeamTransferClient()
+	fileClient := dep.FileClient()
+
+	teamHash := c.Query("team_id")
+	if teamHash == "" {
+		return nil, serializer.NewError(serializer.CodeParamErr, "team_id is required", nil)
+	}
+	sourceTeamID, err := hasher.Decode(teamHash, hashid.TeamID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
+	}
+
+	ctx := c.Request.Context()
+	membership, err := teamClient.GetMembership(ctx, sourceTeamID, user.ID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a member of the team", err)
+		}
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to check membership", err)
+	}
+	if !isSourceApproverRole(membership.Role) {
+		return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Only owners and admins can list pending sends", nil)
+	}
+
+	pending, err := transferClient.ListPendingBySourceTeam(ctx, sourceTeamID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to list pending transfers", err)
+	}
+
+	out := make([]PendingTeamTransferItem, 0, len(pending))
+	for _, tr := range pending {
+		name := ""
+		if tr.SourceFileID > 0 {
+			if f, err := fileClient.GetByID(ctx, tr.SourceFileID); err == nil {
+				name = f.Name
+			}
+		}
+		destName := ""
+		destID := hashid.EncodeTeamID(hasher, tr.DestTeamID)
+		if dst, err := teamClient.GetByID(ctx, tr.DestTeamID); err == nil {
+			destName = dst.Name
+		}
+		nick := ""
+		if u, err := dep.UserClient().GetByID(ctx, tr.CreatedBy); err == nil {
+			nick = u.Nick
+		}
+		out = append(out, PendingTeamTransferItem{
+			ID:             hashid.EncodeTeamTransferID(hasher, tr.ID),
+			SourceFileName: name,
+			DestTeamID:     destID,
+			DestTeamName:   destName,
+			CreatedByNick:  nick,
+			AllowWrite:     tr.AllowWrite,
+			CreatedAt:      tr.CreatedAt.Unix(),
+		})
+	}
+	return out, nil
+}
+
+// ConfirmTeamTransfer creates the destination stub for a pending send.
+func ConfirmTeamTransfer(c *gin.Context) (*TeamTransferResponse, error) {
+	dep := dependency.FromContext(c)
+	user := inventory.UserFromContext(c)
+	hasher := dep.HashIDEncoder()
+	teamClient := dep.TeamClient()
+	transferClient := dep.TeamTransferClient()
+	fileClient := dep.FileClient()
+
+	tid, err := hasher.Decode(c.Param("id"), hashid.TeamTransferID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeParamErr, "Invalid transfer id", err)
+	}
+
+	ctx := context.WithValue(c.Request.Context(), inventory.LoadTeamRoot{}, true)
+	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceFile{}, true)
+	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceTeam{}, true)
+	ctx = context.WithValue(ctx, inventory.LoadTeamTransferDestTeam{}, true)
+
+	tr, err := transferClient.GetByID(ctx, tid)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeNotFound, "Transfer not found", err)
+	}
+	if tr.Status != inventory.TeamTransferStatusPending {
+		return nil, serializer.NewError(serializer.CodeParamErr, "Transfer is not pending", nil)
+	}
+
+	membership, err := teamClient.GetMembership(ctx, tr.SourceTeamID, user.ID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a member of the source team", err)
+		}
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to check membership", err)
+	}
+	if !isSourceApproverRole(membership.Role) {
+		return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Only owners and admins can confirm sends", nil)
+	}
+
+	if tr.SourceFileID == 0 || tr.SourceFile == nil {
+		return nil, serializer.NewError(serializer.CodeNotFound, "Source file no longer exists", nil)
+	}
+	if tr.SourceFile.IsSymbolic {
+		return nil, serializer.NewError(serializer.CodeParamErr, "Source file is symbolic", nil)
+	}
+	if tr.DestTeam == nil || tr.DestTeam.Edges.Root == nil {
+		dstTeam, err := teamClient.GetByID(ctx, tr.DestTeamID)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeNotFound, "Destination team not found", err)
+		}
+		if dstTeam.Edges.Root == nil {
+			root, err := fileClient.GetByID(ctx, dstTeam.RootFileID)
+			if err != nil {
+				return nil, serializer.NewError(serializer.CodeDBError, "Failed to load destination root", err)
+			}
+			dstTeam.Edges.Root = root
+		}
+		tr.DestTeam = dstTeam
+	}
+	if tr.SourceTeam == nil {
+		srcTeam, err := teamClient.GetByID(ctx, tr.SourceTeamID)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeNotFound, "Source team not found", err)
+		}
+		tr.SourceTeam = srcTeam
+	}
+
+	incoming, err := ensureChildFolder(ctx, fileClient, tr.DestTeam.Edges.Root, incomingFolderName, tr.DestTeam.Edges.Root.OwnerID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create Incoming folder", err)
+	}
+	fromFolderName := sanitizeFolderName(tr.SourceTeam.Name)
+	fromFolder, err := ensureChildFolder(ctx, fileClient, incoming, fromFolderName, tr.DestTeam.Edges.Root.OwnerID)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create source Incoming subfolder", err)
+	}
+
+	creatorNick := user.Nick
+	if tr.Creator != nil {
+		creatorNick = tr.Creator.Nick
+	} else if u, err := dep.UserClient().GetByID(ctx, tr.CreatedBy); err == nil {
+		creatorNick = u.Nick
+	}
+
+	isDir := tr.SourceFile.Type == int(types.FileTypeFolder)
+	fc, tx, txCtx, err := inventory.WithTx(ctx, fileClient)
+	if err != nil {
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
+	}
+	tc, _ := inventory.InheritTx(txCtx, transferClient)
+
+	stub, stubName, err := createStubForPendingTransferInTx(txCtx, fc, tc, hasher, fromFolder, tr.SourceFile.Name, isDir, tr, map[string]string{
+		dbfs.MetadataTransferFromTeam:     hashid.EncodeTeamID(hasher, tr.SourceTeamID),
+		dbfs.MetadataTransferFromTeamName: tr.SourceTeam.Name,
+		dbfs.MetadataTransferBy:           hashid.EncodeUserID(hasher, tr.CreatedBy),
+		dbfs.MetadataTransferByNick:       creatorNick,
+		dbfs.MetadataTransferAllowWrite:   lo.Ternary(tr.AllowWrite, "1", "0"),
+	})
+	if err != nil {
+		_ = inventory.Rollback(tx)
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to confirm transfer", err)
+	}
+	if err := inventory.Commit(tx); err != nil {
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to commit transfer confirm", err)
+	}
+
+	destURI := fmt.Sprintf("%s://%s@%s/%s/%s/%s",
+		constants.CloudreveScheme,
+		hashid.EncodeTeamID(hasher, tr.DestTeamID),
+		constants.FileSystemTeam,
+		incomingFolderName,
+		fromFolderName,
+		stubName,
+	)
+	_ = stub
+	return &TeamTransferResponse{
+		ID:           hashid.EncodeTeamTransferID(hasher, tr.ID),
+		DestPath:     destURI,
+		SourceURI:    "",
+		AllowWrite:   tr.AllowWrite,
+		FromTeam:     hashid.EncodeTeamID(hasher, tr.SourceTeamID),
+		FromTeamName: tr.SourceTeam.Name,
+		Status:       inventory.TeamTransferStatusActive,
+	}, nil
+}
+
+// createStubForPendingTransferInTx inserts the symbolic stub and activates the existing pending row.
+func createStubForPendingTransferInTx(
+	ctx context.Context,
+	fc inventory.FileClient,
+	tc inventory.TeamTransferClient,
+	hasher hashid.Encoder,
+	parent *ent.File,
+	baseName string,
+	isDir bool,
+	tr *inventory.TeamTransfer,
+	provenance map[string]string,
+) (*ent.File, string, error) {
+	var lastErr error
+	for attempt := 0; attempt < 100; attempt++ {
+		name := baseName
+		if attempt > 0 {
+			ext := path.Ext(baseName)
+			stem := strings.TrimSuffix(baseName, ext)
+			name = fmt.Sprintf("%s (%d)%s", stem, attempt, ext)
+		}
+
+		if existing, err := fc.GetChildFile(ctx, parent, parent.OwnerID, name, false); err == nil && existing != nil {
+			lastErr = fmt.Errorf("name %q already exists", name)
+			continue
+		} else if err != nil && !ent.IsNotFound(err) {
+			return nil, "", err
+		}
+
+		meta := make(map[string]string, len(provenance)+1)
+		for k, v := range provenance {
+			meta[k] = v
+		}
+		meta[dbfs.MetadataTeamTransferRedirect] = fmt.Sprintf("%s://pending@%s", constants.CloudreveScheme, constants.FileSystemTeamTransfer)
+
+		if _, err := fc.GetClient().ExecContext(ctx, "SAVEPOINT tt_stub_name"); err != nil {
+			return nil, "", err
+		}
+
+		fileType := types.FileTypeFile
+		if isDir {
+			fileType = types.FileTypeFolder
+		}
+		stub, err := fc.GetClient().File.Create().
+			SetOwnerID(parent.OwnerID).
+			SetType(int(fileType)).
+			SetName(name).
+			SetParent(parent).
+			SetIsSymbolic(true).
+			Save(ctx)
+		if err != nil {
+			if isNameConflict(err) {
+				if _, rbErr := fc.GetClient().ExecContext(ctx, "ROLLBACK TO SAVEPOINT tt_stub_name"); rbErr != nil {
+					return nil, "", rbErr
+				}
+				lastErr = err
+				continue
+			}
+			return nil, "", err
+		}
+		if err := fc.UpsertMetadata(ctx, stub, meta, nil); err != nil {
+			return nil, "", err
+		}
+
+		ok, err := tc.Activate(ctx, tr.ID, stub.ID)
+		if err != nil {
+			return nil, "", err
+		}
+		if !ok {
+			if _, rbErr := fc.GetClient().ExecContext(ctx, "ROLLBACK TO SAVEPOINT tt_stub_name"); rbErr != nil {
+				return nil, "", rbErr
+			}
+			return nil, "", fmt.Errorf("transfer is no longer pending")
+		}
+
+		redirect := fmt.Sprintf("%s://%s@%s", constants.CloudreveScheme, hashid.EncodeTeamTransferID(hasher, tr.ID), constants.FileSystemTeamTransfer)
+		if err := fc.UpsertMetadata(ctx, stub, map[string]string{
+			dbfs.MetadataTeamTransferRedirect: redirect,
+		}, nil); err != nil {
+			return nil, "", err
+		}
+		if _, err := fc.GetClient().ExecContext(ctx, "RELEASE SAVEPOINT tt_stub_name"); err != nil {
+			return nil, "", err
+		}
+		return stub, name, nil
+	}
+	return nil, "", fmt.Errorf("could not allocate unique stub name for %q: %w", baseName, lastErr)
 }
 
 // createTransferStubInTx creates the stub + transfer row + final redirect in one transaction.
@@ -242,31 +577,20 @@ func createTransferStubInTx(
 			return nil, "", nil, err
 		}
 
-		var stub *ent.File
-		var err error
+		// Plain insert. CreateFolder's ON CONFLICT returns a raced row, and
+		// CreateFile always sets storage_policy_files. Incoming has no policy,
+		// so 0 violates files_storage_policies_files. A symbolic stub stores no bytes.
+		fileType := types.FileTypeFile
 		if isDir {
-			// Plain insert. CreateFolder's ON CONFLICT DO NOTHING would return
-			// a raced symbolic sibling and write this transfer onto it.
-			stub, err = fc.GetClient().File.Create().
-				SetOwnerID(parent.OwnerID).
-				SetType(int(types.FileTypeFolder)).
-				SetName(name).
-				SetParent(parent).
-				SetIsSymbolic(true).
-				Save(ctx)
-		} else {
-			fileArgs := &inventory.CreateFileParameters{
-				FileType:   types.FileTypeFile,
-				Name:       name,
-				IsSymbolic: true,
-				OwnerID:    parent.OwnerID,
-				Metadata:   meta,
-			}
-			if parent.StoragePolicyFiles > 0 {
-				fileArgs.StoragePolicyID = parent.StoragePolicyFiles
-			}
-			stub, _, _, err = fc.CreateFile(ctx, parent, fileArgs)
+			fileType = types.FileTypeFolder
 		}
+		stub, err := fc.GetClient().File.Create().
+			SetOwnerID(parent.OwnerID).
+			SetType(int(fileType)).
+			SetName(name).
+			SetParent(parent).
+			SetIsSymbolic(true).
+			Save(ctx)
 		if err != nil {
 			if isNameConflict(err) {
 				if _, rbErr := fc.GetClient().ExecContext(ctx, "ROLLBACK TO SAVEPOINT tt_stub_name"); rbErr != nil {
@@ -277,13 +601,14 @@ func createTransferStubInTx(
 			}
 			return nil, "", nil, err
 		}
-		if isDir {
-			if err := fc.UpsertMetadata(ctx, stub, meta, nil); err != nil {
-				return nil, "", nil, err
-			}
+		if err := fc.UpsertMetadata(ctx, stub, meta, nil); err != nil {
+			return nil, "", nil, err
 		}
 
 		params.DestFileID = stub.ID
+		if params.Status == "" {
+			params.Status = inventory.TeamTransferStatusActive
+		}
 		tr, err := tc.Create(ctx, params)
 		if err != nil {
 			return nil, "", nil, err
@@ -341,8 +666,7 @@ func DeleteTeamTransfer(c *gin.Context) error {
 	}
 	if !canRevoke {
 		if m, err := teamClient.GetMembership(ctx, tr.SourceTeamID, user.ID); err == nil {
-			switch m.Role {
-			case teammember.RoleOwner, teammember.RoleAdmin, teammember.RoleMember:
+			if isSourceWriteRole(m.Role) {
 				canRevoke = true
 			}
 		}
