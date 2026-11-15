@@ -40,13 +40,19 @@ type (
 		Status       string `json:"status"`
 	}
 	PendingTeamTransferItem struct {
-		ID             string `json:"id"`
-		SourceFileName string `json:"source_file_name"`
-		DestTeamID     string `json:"dest_team_id"`
-		DestTeamName   string `json:"dest_team_name"`
-		CreatedByNick  string `json:"created_by_nick"`
-		AllowWrite     bool   `json:"allow_write"`
-		CreatedAt      int64  `json:"created_at"`
+		ID                string `json:"id"`
+		SourceFileName    string `json:"source_file_name"`
+		SourceIsDir       bool   `json:"source_is_dir"`
+		SourceSize        int64  `json:"source_size"`
+		SourceTeamID      string `json:"source_team_id"`
+		SourceTeamName    string `json:"source_team_name"`
+		DestTeamID        string `json:"dest_team_id"`
+		DestTeamName      string `json:"dest_team_name"`
+		CreatedBy         string `json:"created_by"`
+		CreatedByNick     string `json:"created_by_nick"`
+		CreatedByUsername string `json:"created_by_username"`
+		AllowWrite        bool   `json:"allow_write"`
+		CreatedAt         int64  `json:"created_at"`
 	}
 )
 
@@ -258,7 +264,9 @@ func (s *CreateTeamTransferService) Create(c *gin.Context) ([]TeamTransferRespon
 	return results, nil
 }
 
-// ListPendingTeamTransfers returns pending outgoing sends for a source team.
+// ListPendingTeamTransfers returns pending outgoing sends.
+// With team_id: that source team only (caller must be owner/admin).
+// Without team_id: all pending sends from teams where the caller is owner/admin.
 func ListPendingTeamTransfers(c *gin.Context) ([]PendingTeamTransferItem, error) {
 	dep := dependency.FromContext(c)
 	user := inventory.UserFromContext(c)
@@ -266,59 +274,75 @@ func ListPendingTeamTransfers(c *gin.Context) ([]PendingTeamTransferItem, error)
 	teamClient := dep.TeamClient()
 	transferClient := dep.TeamTransferClient()
 	fileClient := dep.FileClient()
-
-	teamHash := c.Query("team_id")
-	if teamHash == "" {
-		return nil, serializer.NewError(serializer.CodeParamErr, "team_id is required", nil)
-	}
-	sourceTeamID, err := hasher.Decode(teamHash, hashid.TeamID)
-	if err != nil {
-		return nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
-	}
-
 	ctx := c.Request.Context()
-	membership, err := teamClient.GetMembership(ctx, sourceTeamID, user.ID)
-	if err != nil {
-		if ent.IsNotFound(err) {
-			return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a member of the team", err)
+
+	teamIDs := make([]int, 0)
+	teamHash := c.Query("team_id")
+	if teamHash != "" {
+		sourceTeamID, err := hasher.Decode(teamHash, hashid.TeamID)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeParamErr, "Invalid team id", err)
 		}
-		return nil, serializer.NewError(serializer.CodeDBError, "Failed to check membership", err)
-	}
-	if !isSourceApproverRole(membership.Role) {
-		return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Only owners and admins can list pending sends", nil)
-	}
-
-	pending, err := transferClient.ListPendingBySourceTeam(ctx, sourceTeamID)
-	if err != nil {
-		return nil, serializer.NewError(serializer.CodeDBError, "Failed to list pending transfers", err)
-	}
-
-	out := make([]PendingTeamTransferItem, 0, len(pending))
-	for _, tr := range pending {
-		name := ""
-		if tr.SourceFileID > 0 {
-			if f, err := fileClient.GetByID(ctx, tr.SourceFileID); err == nil {
-				name = f.Name
+		membership, err := teamClient.GetMembership(ctx, sourceTeamID, user.ID)
+		if err != nil {
+			if ent.IsNotFound(err) {
+				return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Not a member of the team", err)
+			}
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to check membership", err)
+		}
+		if !isSourceApproverRole(membership.Role) {
+			return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Only owners and admins can list pending sends", nil)
+		}
+		teamIDs = append(teamIDs, sourceTeamID)
+	} else {
+		memberships, err := teamClient.ListByUser(ctx, user.ID)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to list teams", err)
+		}
+		for _, m := range memberships {
+			if isSourceApproverRole(m.Role) {
+				teamIDs = append(teamIDs, m.TeamID)
 			}
 		}
-		destName := ""
-		destID := hashid.EncodeTeamID(hasher, tr.DestTeamID)
-		if dst, err := teamClient.GetByID(ctx, tr.DestTeamID); err == nil {
-			destName = dst.Name
+	}
+
+	out := make([]PendingTeamTransferItem, 0)
+	for _, sourceTeamID := range teamIDs {
+		pending, err := transferClient.ListPendingBySourceTeam(ctx, sourceTeamID)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to list pending transfers", err)
 		}
-		nick := ""
-		if u, err := dep.UserClient().GetByID(ctx, tr.CreatedBy); err == nil {
-			nick = u.Nick
+		srcTeamName := ""
+		srcTeamIDHash := hashid.EncodeTeamID(hasher, sourceTeamID)
+		if src, err := teamClient.GetByID(ctx, sourceTeamID); err == nil {
+			srcTeamName = src.Name
 		}
-		out = append(out, PendingTeamTransferItem{
-			ID:             hashid.EncodeTeamTransferID(hasher, tr.ID),
-			SourceFileName: name,
-			DestTeamID:     destID,
-			DestTeamName:   destName,
-			CreatedByNick:  nick,
-			AllowWrite:     tr.AllowWrite,
-			CreatedAt:      tr.CreatedAt.Unix(),
-		})
+		for _, tr := range pending {
+			item := PendingTeamTransferItem{
+				ID:             hashid.EncodeTeamTransferID(hasher, tr.ID),
+				SourceTeamID:   srcTeamIDHash,
+				SourceTeamName: srcTeamName,
+				DestTeamID:     hashid.EncodeTeamID(hasher, tr.DestTeamID),
+				AllowWrite:     tr.AllowWrite,
+				CreatedAt:      tr.CreatedAt.Unix(),
+				CreatedBy:      hashid.EncodeUserID(hasher, tr.CreatedBy),
+			}
+			if tr.SourceFileID > 0 {
+				if f, err := fileClient.GetByID(ctx, tr.SourceFileID); err == nil {
+					item.SourceFileName = f.Name
+					item.SourceIsDir = f.Type == int(types.FileTypeFolder)
+					item.SourceSize = f.Size
+				}
+			}
+			if dst, err := teamClient.GetByID(ctx, tr.DestTeamID); err == nil {
+				item.DestTeamName = dst.Name
+			}
+			if u, err := dep.UserClient().GetByID(ctx, tr.CreatedBy); err == nil {
+				item.CreatedByNick = u.Nick
+				item.CreatedByUsername = u.Username
+			}
+			out = append(out, item)
+		}
 	}
 	return out, nil
 }
