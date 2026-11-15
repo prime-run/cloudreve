@@ -26,6 +26,9 @@ func (TeamTransfer) Fields() []ent.Field {
 		field.Int("created_by"),
 		field.Bool("allow_write").
 			Default(false),
+		// pending: waiting for source owner/admin; active: live link in destination.
+		field.String("status").
+			Default("active"),
 	}
 }
 

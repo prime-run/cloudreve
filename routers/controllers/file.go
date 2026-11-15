@@ -299,11 +299,30 @@ func MoveFile(c *gin.Context) {
 	c.JSON(200, serializer.Response{})
 }
 
-// Delete 删除文件或目录
 // CreateTeamTransfer sends team files to another team as live links.
 func CreateTeamTransfer(c *gin.Context) {
 	service := ParametersFromContext[*explorer.CreateTeamTransferService](c, explorer.TeamTransferCreateParamCtx{})
 	res, err := service.Create(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+// ListPendingTeamTransfers lists pending outgoing sends for a source team.
+func ListPendingTeamTransfers(c *gin.Context) {
+	res, err := explorer.ListPendingTeamTransfers(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
+// ConfirmTeamTransfer confirms a pending send and creates the destination stub.
+func ConfirmTeamTransfer(c *gin.Context) {
+	res, err := explorer.ConfirmTeamTransfer(c)
 	if err != nil {
 		c.JSON(200, serializer.Err(c, err))
 		return

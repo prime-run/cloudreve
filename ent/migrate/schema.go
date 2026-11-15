@@ -545,6 +545,7 @@ var (
 		{Name: "dest_team_id", Type: field.TypeInt},
 		{Name: "dest_file_id", Type: field.TypeInt, Nullable: true, Unique: true},
 		{Name: "created_by", Type: field.TypeInt},
+		{Name: "status", Type: field.TypeString, Default: "active"},
 	}
 	// TeamTransfersTable holds the schema information for the "team_transfers" table.
 	TeamTransfersTable = &schema.Table{
