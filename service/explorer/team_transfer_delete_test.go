@@ -489,6 +489,9 @@ func TestConfirmPendingTransferCreatesStub(t *testing.T) {
 	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
 	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
 
+	srcTeam, err := client.Team.Get(ctx, srcTeamID)
+	require.NoError(t, err)
+
 	tr, err := tc.Create(ctx, &inventory.CreateTeamTransferParams{
 		SourceFileID: srcFile.ID,
 		SourceTeamID: srcTeamID,
@@ -499,17 +502,12 @@ func TestConfirmPendingTransferCreatesStub(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	incoming, err := ensureChildFolder(ctx, fc, dstRoot, incomingFolderName, dstRoot.OwnerID)
-	require.NoError(t, err)
-	fromFolder, err := ensureChildFolder(ctx, fc, incoming, "src", dstRoot.OwnerID)
-	require.NoError(t, err)
-
 	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
 	require.NoError(t, err)
 	tcTx, _ := inventory.InheritTx(txCtx, tc)
 
-	stub, name, err := createStubForPendingTransferInTx(txCtx, fcTx, tcTx, hasher, fromFolder, "report.pdf", false, tr, map[string]string{
-		"sys:transfer_from_team_name": "src",
+	stub, name, _, err := confirmPendingTransferInTx(txCtx, fcTx, tcTx, hasher, dstRoot, srcTeam.Name, srcFile, tr, map[string]string{
+		"sys:transfer_from_team_name": srcTeam.Name,
 	})
 	require.NoError(t, err)
 	require.Equal(t, "report.pdf", name)
@@ -534,6 +532,126 @@ func TestConfirmPendingTransferCreatesStub(t *testing.T) {
 	got2, err := tc.GetByID(ctx, tr.ID)
 	require.NoError(t, err)
 	require.Equal(t, stub.ID, got2.DestFileID)
+}
+
+func TestConfirmFailedActivateRollsBackIncomingFolders(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	srcFile, err := client.File.Create().
+		SetType(int(types.FileTypeFile)).
+		SetName("report.pdf").
+		SetOwnerID(parent.OwnerID).
+		SetParent(parent).
+		Save(ctx)
+	require.NoError(t, err)
+
+	dstTeam, err := client.Team.Get(ctx, dstTeamID)
+	require.NoError(t, err)
+	dstRoot, err := client.File.Get(ctx, dstTeam.RootFileID)
+	require.NoError(t, err)
+	srcTeam, err := client.Team.Get(ctx, srcTeamID)
+	require.NoError(t, err)
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+
+	// Already-existing Incoming must survive a failed confirm.
+	existingIncoming, err := ensureChildFolder(ctx, fc, dstRoot, incomingFolderName, dstRoot.OwnerID)
+	require.NoError(t, err)
+
+	// Pending row that Activate will reject because status is already active.
+	tr, err := tc.Create(ctx, &inventory.CreateTeamTransferParams{
+		SourceFileID: srcFile.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+		Status:       inventory.TeamTransferStatusActive,
+		DestFileID:   0,
+	})
+	require.NoError(t, err)
+	// Force active with null dest so Activate's pending guard fails.
+	_, err = client.ExecContext(ctx, `UPDATE team_transfers SET status = 'active', dest_file_id = NULL WHERE id = ?`, tr.ID)
+	require.NoError(t, err)
+	tr.Status = inventory.TeamTransferStatusActive
+
+	beforeChildren, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+
+	fcTx, tx, txCtx, err := inventory.WithTx(ctx, fc)
+	require.NoError(t, err)
+	tcTx, _ := inventory.InheritTx(txCtx, tc)
+
+	_, _, _, err = confirmPendingTransferInTx(txCtx, fcTx, tcTx, hasher, dstRoot, srcTeam.Name, srcFile, tr, map[string]string{
+		"sys:transfer_from_team_name": srcTeam.Name,
+	})
+	require.Error(t, err)
+	require.NoError(t, inventory.Rollback(tx))
+
+	afterChildren, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, beforeChildren, afterChildren)
+
+	still, err := client.File.Get(ctx, existingIncoming.ID)
+	require.NoError(t, err)
+	require.Equal(t, incomingFolderName, still.Name)
+
+	fromName := sanitizeFolderName(srcTeam.Name)
+	_, err = fc.GetChildFile(ctx, existingIncoming, dstRoot.OwnerID, fromName, false)
+	require.True(t, ent.IsNotFound(err), "source Incoming subfolder from failed confirm must not remain")
+}
+
+func TestPendingWithDeletedSourceFile(t *testing.T) {
+	ctx := context.Background()
+	client := openTransferTestDB(t)
+	parent, _, _, srcTeamID, dstTeamID := seedSymbolicStub(t, client)
+	srcFile, err := client.File.Create().
+		SetType(int(types.FileTypeFile)).
+		SetName("gone.pdf").
+		SetOwnerID(parent.OwnerID).
+		SetParent(parent).
+		Save(ctx)
+	require.NoError(t, err)
+
+	hasher, err := hashid.New("test-salt")
+	require.NoError(t, err)
+	fc := inventory.NewFileClient(client, conf.SQLite3DB, hasher)
+	tc := inventory.NewTeamTransferClient(client, conf.SQLite3DB)
+
+	tr, err := tc.Create(ctx, &inventory.CreateTeamTransferParams{
+		SourceFileID: srcFile.ID,
+		SourceTeamID: srcTeamID,
+		DestTeamID:   dstTeamID,
+		CreatedBy:    parent.OwnerID,
+		Status:       inventory.TeamTransferStatusPending,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, client.File.DeleteOneID(srcFile.ID).Exec(ctx))
+
+	pending, err := tc.ListPendingBySourceTeam(ctx, srcTeamID)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, tr.ID, pending[0].ID)
+
+	// List handler leaves an empty name when the file is gone.
+	_, err = fc.GetByID(ctx, pending[0].SourceFileID)
+	require.True(t, ent.IsNotFound(err))
+
+	loaded, err := tc.GetByID(ctx, tr.ID)
+	require.NoError(t, err)
+	require.Equal(t, inventory.TeamTransferStatusPending, loaded.Status)
+
+	before, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+	_, err = loadSourceFileForConfirm(ctx, fc, loaded)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Source file no longer exists")
+	after, err := client.File.Query().Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, before, after, "confirm must not create Incoming or a stub when the source file is gone")
 }
 
 func TestOwnerAdminSendCreatesActiveStub(t *testing.T) {

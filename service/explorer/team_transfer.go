@@ -323,6 +323,57 @@ func ListPendingTeamTransfers(c *gin.Context) ([]PendingTeamTransferItem, error)
 	return out, nil
 }
 
+// loadSourceFileForConfirm loads the source file for a pending transfer.
+// Missing or symbolic sources return dedicated errors; the transfer row itself
+// is assumed already loaded without LoadTeamTransferSourceFile.
+func loadSourceFileForConfirm(ctx context.Context, fc inventory.FileClient, tr *inventory.TeamTransfer) (*ent.File, error) {
+	if tr.SourceFileID == 0 {
+		return nil, serializer.NewError(serializer.CodeNotFound, "Source file no longer exists", nil)
+	}
+	f, err := fc.GetByID(ctx, tr.SourceFileID)
+	if err != nil {
+		if ent.IsNotFound(err) {
+			return nil, serializer.NewError(serializer.CodeNotFound, "Source file no longer exists", err)
+		}
+		return nil, serializer.NewError(serializer.CodeDBError, "Failed to load source file", err)
+	}
+	if f.IsSymbolic {
+		return nil, serializer.NewError(serializer.CodeParamErr, "Source file is symbolic", nil)
+	}
+	return f, nil
+}
+
+// confirmPendingTransferInTx creates Incoming/{SourceTeam}, the stub, and activates
+// the pending row using the transaction-bound file client. On failure the caller
+// must roll back so folders created by this attempt are undone.
+func confirmPendingTransferInTx(
+	ctx context.Context,
+	fc inventory.FileClient,
+	tc inventory.TeamTransferClient,
+	hasher hashid.Encoder,
+	dstRoot *ent.File,
+	srcTeamName string,
+	srcFile *ent.File,
+	tr *inventory.TeamTransfer,
+	provenance map[string]string,
+) (*ent.File, string, string, error) {
+	incoming, err := ensureChildFolder(ctx, fc, dstRoot, incomingFolderName, dstRoot.OwnerID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	fromFolderName := sanitizeFolderName(srcTeamName)
+	fromFolder, err := ensureChildFolder(ctx, fc, incoming, fromFolderName, dstRoot.OwnerID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	isDir := srcFile.Type == int(types.FileTypeFolder)
+	stub, stubName, err := createStubForPendingTransferInTx(ctx, fc, tc, hasher, fromFolder, srcFile.Name, isDir, tr, provenance)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return stub, stubName, fromFolderName, nil
+}
+
 // ConfirmTeamTransfer creates the destination stub for a pending send.
 func ConfirmTeamTransfer(c *gin.Context) (*TeamTransferResponse, error) {
 	dep := dependency.FromContext(c)
@@ -338,10 +389,9 @@ func ConfirmTeamTransfer(c *gin.Context) (*TeamTransferResponse, error) {
 	}
 
 	ctx := context.WithValue(c.Request.Context(), inventory.LoadTeamRoot{}, true)
-	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceFile{}, true)
-	ctx = context.WithValue(ctx, inventory.LoadTeamTransferSourceTeam{}, true)
-	ctx = context.WithValue(ctx, inventory.LoadTeamTransferDestTeam{}, true)
 
+	// Load the transfer row first without requiring the source file edge, so a
+	// deleted source returns "Source file no longer exists" instead of "Transfer not found".
 	tr, err := transferClient.GetByID(ctx, tid)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeNotFound, "Transfer not found", err)
@@ -361,61 +411,44 @@ func ConfirmTeamTransfer(c *gin.Context) (*TeamTransferResponse, error) {
 		return nil, serializer.NewError(serializer.CodeNoPermissionErr, "Only owners and admins can confirm sends", nil)
 	}
 
-	if tr.SourceFileID == 0 || tr.SourceFile == nil {
-		return nil, serializer.NewError(serializer.CodeNotFound, "Source file no longer exists", nil)
-	}
-	if tr.SourceFile.IsSymbolic {
-		return nil, serializer.NewError(serializer.CodeParamErr, "Source file is symbolic", nil)
-	}
-	if tr.DestTeam == nil || tr.DestTeam.Edges.Root == nil {
-		dstTeam, err := teamClient.GetByID(ctx, tr.DestTeamID)
-		if err != nil {
-			return nil, serializer.NewError(serializer.CodeNotFound, "Destination team not found", err)
-		}
-		if dstTeam.Edges.Root == nil {
-			root, err := fileClient.GetByID(ctx, dstTeam.RootFileID)
-			if err != nil {
-				return nil, serializer.NewError(serializer.CodeDBError, "Failed to load destination root", err)
-			}
-			dstTeam.Edges.Root = root
-		}
-		tr.DestTeam = dstTeam
-	}
-	if tr.SourceTeam == nil {
-		srcTeam, err := teamClient.GetByID(ctx, tr.SourceTeamID)
-		if err != nil {
-			return nil, serializer.NewError(serializer.CodeNotFound, "Source team not found", err)
-		}
-		tr.SourceTeam = srcTeam
+	srcFile, err := loadSourceFileForConfirm(ctx, fileClient, tr)
+	if err != nil {
+		return nil, err
 	}
 
-	incoming, err := ensureChildFolder(ctx, fileClient, tr.DestTeam.Edges.Root, incomingFolderName, tr.DestTeam.Edges.Root.OwnerID)
+	dstTeam, err := teamClient.GetByID(ctx, tr.DestTeamID)
 	if err != nil {
-		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create Incoming folder", err)
+		return nil, serializer.NewError(serializer.CodeNotFound, "Destination team not found", err)
 	}
-	fromFolderName := sanitizeFolderName(tr.SourceTeam.Name)
-	fromFolder, err := ensureChildFolder(ctx, fileClient, incoming, fromFolderName, tr.DestTeam.Edges.Root.OwnerID)
+	if dstTeam.Edges.Root == nil {
+		root, err := fileClient.GetByID(ctx, dstTeam.RootFileID)
+		if err != nil {
+			return nil, serializer.NewError(serializer.CodeDBError, "Failed to load destination root", err)
+		}
+		dstTeam.Edges.Root = root
+	}
+	tr.DestTeam = dstTeam
+
+	srcTeam, err := teamClient.GetByID(ctx, tr.SourceTeamID)
 	if err != nil {
-		return nil, serializer.NewError(serializer.CodeDBError, "Failed to create source Incoming subfolder", err)
+		return nil, serializer.NewError(serializer.CodeNotFound, "Source team not found", err)
 	}
+	tr.SourceTeam = srcTeam
 
 	creatorNick := user.Nick
-	if tr.Creator != nil {
-		creatorNick = tr.Creator.Nick
-	} else if u, err := dep.UserClient().GetByID(ctx, tr.CreatedBy); err == nil {
+	if u, err := dep.UserClient().GetByID(ctx, tr.CreatedBy); err == nil {
 		creatorNick = u.Nick
 	}
 
-	isDir := tr.SourceFile.Type == int(types.FileTypeFolder)
 	fc, tx, txCtx, err := inventory.WithTx(ctx, fileClient)
 	if err != nil {
 		return nil, serializer.NewError(serializer.CodeDBError, "Failed to start transaction", err)
 	}
 	tc, _ := inventory.InheritTx(txCtx, transferClient)
 
-	stub, stubName, err := createStubForPendingTransferInTx(txCtx, fc, tc, hasher, fromFolder, tr.SourceFile.Name, isDir, tr, map[string]string{
+	stub, stubName, fromFolderName, err := confirmPendingTransferInTx(txCtx, fc, tc, hasher, dstTeam.Edges.Root, srcTeam.Name, srcFile, tr, map[string]string{
 		dbfs.MetadataTransferFromTeam:     hashid.EncodeTeamID(hasher, tr.SourceTeamID),
-		dbfs.MetadataTransferFromTeamName: tr.SourceTeam.Name,
+		dbfs.MetadataTransferFromTeamName: srcTeam.Name,
 		dbfs.MetadataTransferBy:           hashid.EncodeUserID(hasher, tr.CreatedBy),
 		dbfs.MetadataTransferByNick:       creatorNick,
 		dbfs.MetadataTransferAllowWrite:   lo.Ternary(tr.AllowWrite, "1", "0"),
@@ -443,7 +476,7 @@ func ConfirmTeamTransfer(c *gin.Context) (*TeamTransferResponse, error) {
 		SourceURI:    "",
 		AllowWrite:   tr.AllowWrite,
 		FromTeam:     hashid.EncodeTeamID(hasher, tr.SourceTeamID),
-		FromTeamName: tr.SourceTeam.Name,
+		FromTeamName: srcTeam.Name,
 		Status:       inventory.TeamTransferStatusActive,
 	}, nil
 }
