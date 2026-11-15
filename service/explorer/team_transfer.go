@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/cloudreve/Cloudreve/v4/application/constants"
@@ -41,6 +42,7 @@ type (
 	}
 	PendingTeamTransferItem struct {
 		ID                string `json:"id"`
+		SourceFound       bool   `json:"source_found"`
 		SourceFileName    string `json:"source_file_name"`
 		SourceIsDir       bool   `json:"source_is_dir"`
 		SourceSize        int64  `json:"source_size"`
@@ -328,7 +330,13 @@ func ListPendingTeamTransfers(c *gin.Context) ([]PendingTeamTransferItem, error)
 				CreatedBy:      hashid.EncodeUserID(hasher, tr.CreatedBy),
 			}
 			if tr.SourceFileID > 0 {
-				if f, err := fileClient.GetByID(ctx, tr.SourceFileID); err == nil {
+				f, err := fileClient.GetByID(ctx, tr.SourceFileID)
+				if err != nil {
+					if !ent.IsNotFound(err) {
+						return nil, serializer.NewError(serializer.CodeDBError, "Failed to load source file", err)
+					}
+				} else {
+					item.SourceFound = true
 					item.SourceFileName = f.Name
 					item.SourceIsDir = f.Type == int(types.FileTypeFolder)
 					item.SourceSize = f.Size
@@ -344,6 +352,9 @@ func ListPendingTeamTransfers(c *gin.Context) ([]PendingTeamTransferItem, error)
 			out = append(out, item)
 		}
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].CreatedAt < out[j].CreatedAt
+	})
 	return out, nil
 }
 
